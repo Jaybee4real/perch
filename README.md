@@ -6,14 +6,18 @@ I run a lot of servers at once: a few Next.js apps, some NestJS backends, four o
 
 perch fixes that one annoyance. Every server gets a tab with a stable title. Run the same command again and the server restarts in the same tab it was in before, instead of spawning a ninth window. The name comes from that: each server perches in its own spot and returns to it.
 
-## What it does
+## Features
 
-- Kills whatever is holding the server's port, so the restart actually binds instead of failing with `EADDRINUSE`.
-- Finds the Terminal tab whose title matches the project name and reuses it. Only when no such tab exists does it create one.
-- Keeps a registry of your projects, so `perch acme-api` is all you type. Directory, port, and command live in a config file, not in your head.
-- Survives your terminal session. The server runs in a real Terminal.app tab, not a child process of whatever shell launched it, so closing that shell (or the AI agent that called it) leaves the server alive.
+- Launch a registered project by name alone: `perch acme-api`.
+- One reusable tab per server, matched by tab title. No window pileup.
+- Frees the port before starting, so restarts never die with `EADDRINUSE`.
+- `perch list` shows every project with a live up/down check against its port.
+- `perch stop` kills whatever holds a project's port, by name or by number.
+- Registry is a plain text file you can edit by hand, or manage with `perch add` / `perch remove`.
+- Servers outlive the shell that launched them. They run in real Terminal tabs, not child processes.
+- The pre-registry ad-hoc form still works for anything you haven't registered.
 
-That last point is the reason this exists as more than an alias. I use coding agents heavily, and a server started from an agent's shell dies when the session ends. A server started through perch doesn't.
+That second-to-last point is the reason this exists as more than an alias. I use coding agents heavily, and a server started from an agent's shell dies when the session ends. A server started through perch doesn't.
 
 ## Install
 
@@ -39,10 +43,22 @@ perch config                           # where the config file lives
 perch help
 ```
 
-And the original ad-hoc form still works for anything unregistered:
+Say you work on a product called Acme, with a web app, an API, and a mobile app:
 
 ```bash
-perch my-tool ~/code/my-tool 5000 "npm run dev"
+perch add acme-web 3000 ~/code/acme/web "yarn dev"
+perch add acme-api 8000 ~/code/acme/api "yarn start:dev"
+perch add acme-metro 8081 ~/code/acme/mobile "yarn start"
+
+perch acme-api          # API starts in a tab titled acme-api
+perch acme-api          # later: same tab, port freed, server restarted in place
+perch stop acme-web     # kill whatever is on 3000
+```
+
+And the ad-hoc form still works for anything unregistered:
+
+```bash
+perch scratch-tool ~/code/scratch 5000 "npm run dev"
 ```
 
 Pass `-` as the port for tools that don't hold one (a Flutter run, a watcher, a REPL).
@@ -56,9 +72,9 @@ name|port|dir|command
 ```
 
 ```
-acme-api|8000|~/code/acme/acme-api|yarn start:dev
-acme-metro|8085|~/code/acme/acme-mobile|yarn start
-tech-summit-app|-|~/code/Tech_Summit/tech_summit_app|$HOME/Tools/flutter/bin/flutter run
+acme-web|3000|~/code/acme/web|yarn dev
+acme-api|8000|~/code/acme/api|yarn start:dev
+acme-desktop|-|~/code/acme/desktop|$HOME/tools/flutter/bin/flutter run
 ```
 
 Lines starting with `#` are comments. `~` and `$HOME` both expand. Edit the file directly or use `perch add`; they do the same thing.
