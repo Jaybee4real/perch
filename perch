@@ -1,0 +1,225 @@
+#!/usr/bin/env bash
+# perch — start/restart long-running dev servers in named, reusable Terminal.app tabs.
+#
+# Each server "perches" in its own titled tab. Re-invoke with the same name and it
+# returns to the same perch (reusing that tab) instead of flying off into a new window.
+#
+# Run `perch help` for usage.
+set -euo pipefail
+
+PERCH_VERSION="2.0.0"
+CONFIG="${PERCH_CONFIG:-$HOME/.config/perch/projects.conf}"
+
+usage() {
+  cat <<'EOF'
+perch — named dev-server tabs for Terminal.app
+
+USAGE
+  perch <project>                        launch a registered project
+  perch <marker> <dir> <port> <command>  launch anything ad-hoc (port "-" to skip the port kill)
+  perch list                             show every registered project and whether it is running
+  perch stop <project|port>              kill whatever holds that project's port
+  perch add <name> <port> <dir> <command...>   register a project
+  perch remove <name>                    unregister a project
+  perch config                           print the config file path
+  perch help                             this text
+
+EXAMPLES
+  perch acme-api                 start the Acme API in its own tab
+  perch acme-metro           restart Acme Metro in place
+  perch stop acme-api             free port 8080
+  perch my-tool ~/code/my-tool 5000 "npm run dev"
+
+Projects live in ~/.config/perch/projects.conf, one per line:
+  name|port|dir|command
+EOF
+}
+
+expand_path() {
+  local value="$1"
+  value="${value/#\~/$HOME}"
+  printf '%s' "${value//\$HOME/$HOME}"
+}
+
+config_lines() {
+  [ -f "$CONFIG" ] || return 0
+  grep -vE '^\s*(#|$)' "$CONFIG" || true
+}
+
+lookup() {
+  local wanted="$1" name port dir cmd
+  while IFS='|' read -r name port dir cmd; do
+    if [ "$name" = "$wanted" ]; then
+      printf '%s|%s|%s\n' "$port" "$dir" "$cmd"
+      return 0
+    fi
+  done < <(config_lines)
+  return 1
+}
+
+free_port() {
+  local port="$1" pids
+  [ "$port" = "-" ] && return 0
+  pids="$(lsof -ti tcp:"$port" 2>/dev/null || true)"
+  if [ -n "$pids" ]; then
+    # shellcheck disable=SC2086
+    kill -9 $pids 2>/dev/null || true
+    echo "[perch] freed port $port (killed: $(echo "$pids" | tr '\n' ' '))"
+  fi
+}
+
+launch() {
+  local marker="$1" dir="$2" port="$3" cmd="$4"
+  dir="$(expand_path "$dir")"
+  cmd="$(expand_path "$cmd")"
+  [ -d "$dir" ] || { echo "perch: directory not found: $dir" >&2; exit 1; }
+
+  free_port "$port"
+
+  local run="cd \"$dir\" && clear && $cmd"
+  esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
+  local marker_esc run_esc
+  marker_esc="$(esc "$marker")"
+  run_esc="$(esc "$run")"
+
+  /usr/bin/osascript <<OSA
+tell application "Terminal"
+  set theMarker to "$marker_esc"
+  set theCmd to "$run_esc"
+  set foundTab to missing value
+  set foundWin to missing value
+  repeat with w in windows
+    -- Some Terminal windows (e.g. the Settings window) don't expose tabs; skip them.
+    try
+      repeat with t in tabs of w
+        try
+          if (custom title of t) is theMarker then
+            set foundTab to t
+            set foundWin to w
+            exit repeat
+          end if
+        end try
+      end repeat
+    end try
+    if foundTab is not missing value then exit repeat
+  end repeat
+  if foundTab is not missing value then
+    do script theCmd in foundTab
+    set selected of foundTab to true
+    try
+      set index of foundWin to 1
+    end try
+  else
+    set newTab to do script theCmd
+    set custom title of newTab to theMarker
+  end if
+  activate
+end tell
+OSA
+
+  echo "[perch] '$marker' -> $cmd  (tab reused if it existed, else created)"
+}
+
+cmd_list() {
+  if ! config_lines | grep -q .; then
+    echo "perch: no projects registered yet (config: $CONFIG)"
+    echo "Register one with: perch add <name> <port> <dir> <command...>"
+    return 0
+  fi
+  printf '%-28s %-6s %-8s %s\n' 'PROJECT' 'PORT' 'STATUS' 'COMMAND'
+  local name port dir cmd status
+  while IFS='|' read -r name port dir cmd; do
+    status='.'
+    if [ "$port" != "-" ] && lsof -ti tcp:"$port" >/dev/null 2>&1; then
+      status='up'
+    fi
+    printf '%-28s %-6s %-8s %s\n' "$name" "$port" "$status" "$cmd"
+  done < <(config_lines)
+}
+
+cmd_stop() {
+  local target="${1:?usage: perch stop <project|port>}" port entry
+  if [[ "$target" =~ ^[0-9]+$ ]]; then
+    port="$target"
+  elif entry="$(lookup "$target")"; then
+    port="${entry%%|*}"
+    [ "$port" != "-" ] || { echo "perch: '$target' has no port to stop" >&2; exit 1; }
+  else
+    echo "perch: unknown project '$target' (see: perch list)" >&2
+    exit 1
+  fi
+  local pids
+  pids="$(lsof -ti tcp:"$port" 2>/dev/null || true)"
+  if [ -z "$pids" ]; then
+    echo "[perch] nothing running on port $port"
+  else
+    # shellcheck disable=SC2086
+    kill -9 $pids 2>/dev/null || true
+    echo "[perch] stopped port $port (killed: $(echo "$pids" | tr '\n' ' '))"
+  fi
+}
+
+cmd_add() {
+  local name="${1:?usage: perch add <name> <port> <dir> <command...>}"
+  local port="${2:?port required (or - for none)}"
+  local dir="${3:?dir required}"
+  shift 3
+  local cmd="$*"
+  [ -n "$cmd" ] || { echo "perch: command required" >&2; exit 1; }
+  case "$name" in
+    *'|'*|*' '*) echo "perch: name cannot contain spaces or '|'" >&2; exit 1 ;;
+    help|list|stop|add|remove|config) echo "perch: '$name' is a reserved word" >&2; exit 1 ;;
+  esac
+  if lookup "$name" >/dev/null; then
+    echo "perch: '$name' is already registered (perch remove $name first)" >&2
+    exit 1
+  fi
+  mkdir -p "$(dirname "$CONFIG")"
+  printf '%s|%s|%s|%s\n' "$name" "$port" "$dir" "$cmd" >>"$CONFIG"
+  echo "[perch] registered '$name' (port $port)"
+}
+
+cmd_remove() {
+  local name="${1:?usage: perch remove <name>}"
+  lookup "$name" >/dev/null || { echo "perch: unknown project '$name'" >&2; exit 1; }
+  local tmp
+  tmp="$(mktemp)"
+  awk -F'|' -v n="$name" '$1 != n' "$CONFIG" >"$tmp"
+  mv "$tmp" "$CONFIG"
+  echo "[perch] removed '$name'"
+}
+
+main() {
+  local first="${1:-help}"
+  case "$first" in
+    help|-h|--help) usage ;;
+    -v|--version) echo "perch $PERCH_VERSION" ;;
+    list|ls) cmd_list ;;
+    stop) shift; cmd_stop "$@" ;;
+    add) shift; cmd_add "$@" ;;
+    remove|rm) shift; cmd_remove "$@" ;;
+    config) echo "$CONFIG" ;;
+    *)
+      if [ $# -eq 1 ]; then
+        local entry
+        if entry="$(lookup "$first")"; then
+          local port dir cmd
+          IFS='|' read -r port dir cmd <<<"$entry"
+          launch "$first" "$dir" "$port" "$cmd"
+        else
+          echo "perch: unknown project '$first' (see: perch list)" >&2
+          exit 1
+        fi
+      elif [ $# -ge 4 ]; then
+        local marker="$1" dir="$2" port="$3"
+        shift 3
+        launch "$marker" "$dir" "$port" "$*"
+      else
+        usage >&2
+        exit 1
+      fi
+      ;;
+  esac
+}
+
+main "$@"
