@@ -1,0 +1,19 @@
+# perch project registry - name|port|dir|command
+# Copy this to ~/.config/perch/projects.conf (the installer does it for you),
+# then replace these with your own, or use `perch add`.
+# One line per project. Lines starting with # are comments. ~ and $HOME expand.
+# Bake each project's port into its own dev script so the port column stays honest.
+
+# Web (Next / Vite): category "web" / "landing" (by name)
+acme-web|3000|~/code/acme/web|yarn dev
+acme-admin|3002|~/code/acme/admin|yarn dev
+acme-landing|3005|~/code/acme/landing-page|yarn dev
+
+# Backend: category "backend" (by name or port 8000/8001/8080)
+acme-api|8000|~/code/acme/api|yarn start:dev
+
+# Metro (React Native): category "metro" (by name or port 8082-8091)
+acme-metro|8082|~/code/acme/mobile|yarn start
+
+# A tool without a fixed port: use "-" for the port
+acme-desktop|-|~/code/acme/desktop|$HOME/tools/flutter/bin/flutter run

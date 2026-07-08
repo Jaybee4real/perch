@@ -7,7 +7,7 @@
 # Run `perch help` for usage.
 set -euo pipefail
 
-PERCH_VERSION="2.2.0"
+PERCH_VERSION="2.2.1"
 CONFIG="${PERCH_CONFIG:-$HOME/.config/perch/projects.conf}"
 FAVORITES="${PERCH_FAVORITES:-$HOME/.config/perch/favorites}"
 CATEGORIES="${PERCH_CATEGORIES:-$HOME/.config/perch/categories.conf}"
@@ -54,8 +54,8 @@ USAGE
 
 EXAMPLES
   perch acme-api                 start the Acme API in its own tab
-  perch acme-metro           restart Acme Metro in place
-  perch stop acme-api             free port 8080
+  perch acme-metro               restart Acme Metro in place
+  perch stop acme-web            free a port by project name
   perch my-tool ~/code/my-tool 5000 "npm run dev"
 
 Projects live in ~/.config/perch/projects.conf, one per line:

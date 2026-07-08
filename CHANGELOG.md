@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.2.1
+
+- The project registry is now kept out of the repo entirely. `projects.conf` is
+  gitignored; the repo ships `projects.conf.example` and the installer seeds from
+  it. Your project names and paths live only in `~/.config/perch`, never in git.
+
 ## 2.2.0
 
 Favorites, multi-monitor placement, a web dashboard, and portability.

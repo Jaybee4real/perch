@@ -146,6 +146,8 @@ acme-desktop|-|~/code/acme/desktop|$HOME/tools/flutter/bin/flutter run
 
 Lines starting with `#` are comments. `~` and `$HOME` both expand. Edit the file directly or use `perch add`.
 
+Your registry is private. It lives only in `~/.config/perch/` and is never tracked by this repo (the repo ships `projects.conf.example` and gitignores the real names). Same for your favorites, settings, and desktop map.
+
 One convention worth copying: bake each project's port into its own dev script (`vite --port 3011 --strictPort`, `next dev -p 3001`). perch frees the port before launching but cannot stop a server from binding somewhere else. Pinning the port in the script keeps the port column in `perch list` honest.
 
 ## Requirements

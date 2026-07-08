@@ -1,0 +1,9 @@
+# perch config is per-user and private. It lives in ~/.config/perch and must
+# never be committed. Ignore these names even if one lands in the repo dir.
+projects.conf
+favorites
+settings
+spaces.conf
+categories.conf
+window-bounds
+*.local
