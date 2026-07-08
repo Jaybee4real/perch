@@ -27,4 +27,4 @@ case ":$PATH:" in
   *) echo "NOTE: $bin_dir is not on your PATH — add it to your shell profile." ;;
 esac
 
-echo "Try: perch list"
+echo "Try: perch doctor   (then: perch list)"
