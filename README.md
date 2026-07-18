@@ -11,6 +11,8 @@ It has since grown a few larger conveniences: a favorites set you launch as a gr
 ## Features
 
 - Launch a registered project by name alone: `perch acme-api`.
+- **Product clusters**: `perch groups` auto-groups projects by name prefix, and `perch jakstoc` starts the whole cluster (backend first).
+- **Port as single source of truth**: `perch port` lets a project's own start script bind its assigned port, with a framework-default fallback when perch isn't installed.
 - One reusable tab per server, matched by tab title. No window pileup.
 - Frees the port before starting, so restarts never die with `EADDRINUSE`.
 - Servers outlive the shell that launched them. They run in real Terminal tabs, not child processes.
@@ -59,6 +61,7 @@ perch scratch-tool ~/code/scratch 5000 "npm run dev"
 
 ```
 perch <project>                 launch a registered project (restart in place if already open)
+perch <prefix>                  start a whole product cluster, backend-first (e.g. perch jakstoc)
 perch <marker> <dir> <port> <cmd>   ad-hoc launch of anything
 
 perch fav                       interactive picker: choose a working set, save + launch
@@ -82,9 +85,11 @@ perch setup                     auto-detect this machine's monitors + write the 
 perch doctor                    check dependencies and config, with copy-paste fixes
 
 perch list                      every project, its port, whether it's up
+perch groups                    projects grouped by product cluster, with ports + status
+perch port [name]               print a project's assigned port (by name, or by current dir)
 perch add / remove              register / unregister a project
 perch bounds [clear [name]]     inspect / forget remembered window positions
-perch config | help | -v
+perch config | help | -v        help works at every level, e.g. `perch fav add help`
 ```
 
 ## Favorites
@@ -123,7 +128,7 @@ perch gui
 
 Opens a local dashboard at `http://localhost:7620` (bound to localhost only). It shells out to the same CLI, so the two never drift. Two views:
 
-- **Servers**: every project grouped by category with a live up/down dot, one-click start and stop, and a favorite toggle.
+- **Servers**: every project grouped by category with a live up/down dot, one-click start and stop, and a favorite toggle. An **Add project** button opens a native folder picker (the dashboard is local, so it gets the real path), auto-fills the name, and registers the project.
 - **Layout**: a to-scale map of your monitors (position and orientation), each desktop drawn as a mini screen with every window in its real place. perch terminals are colored and draggable; other apps and fullscreen spaces are shown dimmed for context. Drag a terminal to another desktop, hit Save, and it moves the window, remembers the new desktop in `spaces.conf`, and re-tiles.
 
 ## Window position memory
@@ -148,7 +153,16 @@ Lines starting with `#` are comments. `~` and `$HOME` both expand. Edit the file
 
 Your registry is private. It lives only in `~/.config/perch/` and is never tracked by this repo (the repo ships `projects.conf.example` and gitignores the real names). Same for your favorites, settings, and desktop map.
 
-One convention worth copying: bake each project's port into its own dev script (`vite --port 3011 --strictPort`, `next dev -p 3001`). perch frees the port before launching but cannot stop a server from binding somewhere else. Pinning the port in the script keeps the port column in `perch list` honest.
+One convention worth copying: have each project's own start script bind its perch port, falling back to the framework default when perch isn't installed:
+
+```
+next dev -p $(perch port 2>/dev/null || echo 3000)
+vite --port $(perch port 2>/dev/null || echo 5173) --strictPort
+react-native start --port $(perch port 2>/dev/null || echo 8081)
+PORT=$(perch port 2>/dev/null || echo 3000) nest start --watch
+```
+
+`perch port` prints the port assigned to the current directory (or `perch port <name>`). perch frees the port before launching and the script binds exactly that one — so `yarn dev` on its own lands on the right port too, and the port column in `perch list` stays honest. Without perch on the machine, each falls back to its framework default.
 
 ## Requirements
 

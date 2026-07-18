@@ -7,3 +7,9 @@ spaces.conf
 categories.conf
 window-bounds
 *.local
+
+# build/backup cruft
+__pycache__/
+*.bak
+*.portbak
+*.envbak

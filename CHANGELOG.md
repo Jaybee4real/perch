@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.3.0
+
+Product clusters, prefix launch, port resolution, nested help, and dashboard project-add.
+
+### Added
+- **`perch port [name]`**: print the assigned port for a project — by name, or resolved from the current directory. Meant for a project's own start script, so `yarn dev` binds the perch port when perch is installed and the framework default otherwise: `next dev -p $(perch port 2>/dev/null || echo 3000)`.
+- **Product clusters**: `perch groups` lists projects auto-grouped by product (the name up to the first `-`), with ports and live status. Each multi-project cluster shows how to start it all at once.
+- **Prefix launch**: `perch <prefix>` — e.g. `perch jakstoc` (or quoted `perch 'jakstoc*'`) — starts every matching project, backend first.
+- **Nested help**: `help` / `-h` / `--help` now works at every level — `perch fav add help`, `perch place help`, `perch help fav`.
+- **Dashboard — Add project**: the web dashboard gained an *Add project* button that opens a native folder picker (the real absolute path, since the server is local), auto-fills the name, and registers the project.
+
 ## 2.2.1
 
 - The project registry is now kept out of the repo entirely. `projects.conf` is

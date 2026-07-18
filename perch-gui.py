@@ -159,6 +159,46 @@ def _favremove(name):
     except Exception: pass
     return True
 
+def pick_folder():
+    # native macOS folder chooser; the GUI runs locally so we can return the real path
+    default = HOME + "/Documents/Programming-Codes"
+    loc = ' default location (POSIX file "%s")' % default if os.path.isdir(default) else ""
+    choose = 'POSIX path of (choose folder with prompt "Select the project folder"%s)' % loc
+    try:
+        out = subprocess.check_output(
+            ["osascript", "-e", 'tell application "System Events" to activate', "-e", choose],
+            stderr=subprocess.DEVNULL, timeout=180).decode().strip()
+    except subprocess.CalledProcessError:
+        return {"cancelled": True}          # user hit Cancel
+    except Exception as e:
+        return {"error": str(e)}
+    if not out:
+        return {"cancelled": True}
+    out = out.rstrip("/")
+    return {"path": out, "name": os.path.basename(out)}
+
+def add_project(d):
+    name = (d.get("name") or "").strip()
+    port = ((d.get("port") or "").strip() or "-")
+    folder = (d.get("dir") or "").strip()
+    cmd = (d.get("cmd") or "").strip()
+    if not name or not folder or not cmd:
+        return {"ok": False, "error": "name, folder and start command are all required"}
+    if "|" in name or "|" in folder or "|" in cmd:
+        return {"ok": False, "error": "the '|' character is not allowed"}
+    if not os.path.isdir(os.path.expanduser(folder)):
+        return {"ok": False, "error": "folder does not exist: " + folder}
+    if any(p["name"] == name for p in read_projects()):
+        return {"ok": False, "error": "a project named '%s' already exists" % name}
+    try:
+        r = subprocess.run([PERCH, "add", name, port, folder, cmd],
+                           capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            return {"ok": False, "error": (r.stderr or r.stdout or "perch add failed").strip()}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "name": name}
+
 ACTIONS = {
     "start":     lambda d: run_perch([d["name"]]),
     "stop":      lambda d: run_perch(["stop", d["name"]], wait=True),
@@ -179,6 +219,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path == "/" or self.path.startswith("/index"): self._send(200, HTML, "text/html; charset=utf-8")
         elif self.path.startswith("/api/status"): self._send(200, json.dumps(status()))
         elif self.path.startswith("/api/layout"): self._send(200, json.dumps(layout()))
+        elif self.path.startswith("/api/pickfolder"): self._send(200, json.dumps(pick_folder()))
         else: self._send(404, "{}")
     def do_POST(self):
         ln = int(self.headers.get("Content-Length", "0"))
@@ -191,6 +232,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send(200, json.dumps({"ok": True}))
         elif self.path.startswith("/api/arrange"):
             arrange(d.get("moves", [])); self._send(200, json.dumps({"ok": True}))
+        elif self.path.startswith("/api/addproject"):
+            self._send(200, json.dumps(add_project(d)))
         else: self._send(404, "{}")
     def log_message(self, *a): pass
 
@@ -292,6 +335,21 @@ main{max-width:1180px;margin:0 auto;padding:22px}
 .savebar .msg{font-size:13px}.savebar .msg b{color:var(--acc)}
 .foot{color:var(--faint);font-size:11px;text-align:center;padding:26px 0 60px}
 .empty{color:var(--dim);text-align:center;padding:60px 20px}
+/* ---- add-project modal ---- */
+.modal{position:fixed;inset:0;z-index:60;display:none;align-items:center;justify-content:center;background:oklch(0 0 0 /.55);backdrop-filter:blur(4px)}
+.modal.show{display:flex}
+.sheet{background:var(--surf2);border:1px solid var(--line2);border-radius:16px;padding:22px 22px 20px;width:min(470px,92vw);box-shadow:0 24px 70px oklch(0 0 0 /.6)}
+.sheet h2{margin:0 0 4px;font-size:16px;font-weight:680}
+.sheet .desc{color:var(--dim);font-size:12.5px;margin-bottom:8px}
+.sheet label{display:block;font-size:11px;color:var(--dim);font-weight:700;margin:13px 0 5px;text-transform:uppercase;letter-spacing:.5px}
+.in{width:100%;background:var(--bg2);border:1px solid var(--line);border-radius:9px;padding:9px 11px;color:var(--tx);font-size:13px;font-family:inherit}
+.in:focus{outline:none;border-color:var(--acc)}
+.in[readonly]{color:var(--dim);cursor:default}
+.rowf{display:flex;gap:8px}.rowf .in{flex:1}
+.row2{display:flex;gap:12px}.row2 .col-port{width:150px}.row2 .col-cmd{flex:1}
+.rowend{display:flex;justify-content:flex-end;gap:10px;margin-top:20px}
+.aperr{color:var(--red);font-size:12.5px;margin-top:11px;min-height:16px}
+.aperr.info{color:var(--dim)}
 </style></head><body>
 <header>
   <h1>🪺 perch</h1>
@@ -300,6 +358,7 @@ main{max-width:1180px;margin:0 auto;padding:22px}
   <span class="seg"><button id="tab-layout" class="on" onclick="setView('layout')">Layout</button><button id="tab-servers" onclick="setView('servers')">Servers</button></span>
   <span class="toggle" onclick="tog('placement')">placement <span class="sw" id="sw-placement"><i></i></span></span>
   <span class="toggle" onclick="tog('tile')">tile <span class="sw" id="sw-tile"><i></i></span></span>
+  <button class="btn" onclick="openAdd()">＋ Add project</button>
   <button class="btn primary" onclick="act('startall')">Start favorites ▸</button>
 </header>
 <main id="main"></main>
@@ -308,6 +367,28 @@ main{max-width:1180px;margin:0 auto;padding:22px}
   <span class="msg" id="savemsg"></span>
   <button class="btn" onclick="revert()">Revert</button>
   <button class="btn primary" onclick="save()">Save changes</button>
+</div>
+<div class="modal" id="addModal" onclick="if(event.target===this)closeAdd()">
+  <div class="sheet">
+    <h2>Add a project</h2>
+    <div class="desc">Register a project so you can launch it from perch by name.</div>
+    <label>Project folder</label>
+    <div class="rowf">
+      <input id="ap-dir" class="in" placeholder="Pick the project folder…" readonly>
+      <button class="btn" onclick="browseFolder()">Browse…</button>
+    </div>
+    <label>Name</label>
+    <input id="ap-name" class="in" placeholder="my-project">
+    <div class="row2">
+      <div class="col-port"><label>Port</label><input id="ap-port" class="in" placeholder="3000  ( - = none )"></div>
+      <div class="col-cmd"><label>Start command</label><input id="ap-cmd" class="in" placeholder="e.g. npm run dev"></div>
+    </div>
+    <div class="aperr" id="ap-err"></div>
+    <div class="rowend">
+      <button class="btn" onclick="closeAdd()">Cancel</button>
+      <button class="btn primary" id="ap-submit" onclick="submitAdd()">Add project</button>
+    </div>
+  </div>
 </div>
 <script>
 let VIEW='layout', S=null, L=null, PENDING={}; // marker -> new space index
@@ -461,6 +542,37 @@ async function save(){
   await fetch('/api/arrange',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({moves})});
   PENDING={}; setTimeout(()=>{refresh();},700); setTimeout(refresh,2500);
 }
+/* ---------- add project ---------- */
+function apErr(msg,info){ const e=document.getElementById('ap-err'); e.textContent=msg||''; e.className='aperr'+(info?' info':''); }
+function openAdd(){ ['ap-dir','ap-name','ap-port','ap-cmd'].forEach(id=>document.getElementById(id).value=''); apErr(''); document.getElementById('addModal').classList.add('show'); }
+function closeAdd(){ document.getElementById('addModal').classList.remove('show'); }
+async function browseFolder(){
+  apErr('opening folder picker…',true);
+  let r; try{ r=await (await fetch('/api/pickfolder')).json(); }catch(e){ apErr('could not open picker'); return; }
+  if(r.cancelled){ apErr(''); return; }
+  if(r.error){ apErr(r.error); return; }
+  apErr('');
+  document.getElementById('ap-dir').value=r.path;
+  if(!document.getElementById('ap-name').value.trim()) document.getElementById('ap-name').value=r.name||'';
+  document.getElementById('ap-cmd').focus();
+}
+async function submitAdd(){
+  const dir=document.getElementById('ap-dir').value.trim();
+  const name=document.getElementById('ap-name').value.trim();
+  const port=document.getElementById('ap-port').value.trim()||'-';
+  const cmd=document.getElementById('ap-cmd').value.trim();
+  if(!dir) return apErr('Pick a project folder first.');
+  if(!name) return apErr('Enter a name.');
+  if(!cmd) return apErr('Enter a start command.');
+  const btn=document.getElementById('ap-submit'); btn.disabled=true; apErr('adding…',true);
+  let r; try{ r=await (await fetch('/api/addproject',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,port,dir,cmd})})).json(); }
+  catch(e){ btn.disabled=false; return apErr('request failed'); }
+  btn.disabled=false;
+  if(!r.ok) return apErr(r.error||'failed to add');
+  closeAdd(); setView('servers'); setTimeout(refresh,300);
+}
+document.addEventListener('keydown',e=>{ if(e.key==='Escape')closeAdd(); });
+
 loadStatus(); loadLayout();
 setInterval(()=>{ if(!drag&&Object.keys(PENDING).length===0) refresh(); }, 4000);
 </script></body></html>"""

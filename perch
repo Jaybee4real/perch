@@ -7,7 +7,7 @@
 # Run `perch help` for usage.
 set -euo pipefail
 
-PERCH_VERSION="2.2.1"
+PERCH_VERSION="2.3.0"
 CONFIG="${PERCH_CONFIG:-$HOME/.config/perch/projects.conf}"
 FAVORITES="${PERCH_FAVORITES:-$HOME/.config/perch/favorites}"
 CATEGORIES="${PERCH_CATEGORIES:-$HOME/.config/perch/categories.conf}"
@@ -23,6 +23,7 @@ perch — named dev-server tabs for Terminal.app
 
 USAGE
   perch <project>                        launch a registered project
+  perch <prefix>                         start a whole product cluster (e.g. perch jakstoc = every jakstoc-*)
   perch <marker> <dir> <port> <command>  launch anything ad-hoc (port "-" to skip the port kill)
   perch fav                              interactive multi-select picker; saves + launches favorites
   perch fav go                           launch your saved favorites (no menu)
@@ -43,6 +44,7 @@ USAGE
   perch bounds                           list remembered window positions
   perch bounds clear [name]              forget window position(s)
   perch list                             show every registered project and whether it is running
+  perch groups                           list projects grouped by product cluster, with ports + status
   perch stop <project|port>              kill whatever holds that project's port
   perch killall                          stop every running registered server (by port)
   perch killall --close                  ...and close their Terminal tabs too
@@ -50,7 +52,9 @@ USAGE
   perch add <name> <port> <dir> <command...>   register a project
   perch remove <name>                    unregister a project
   perch config                           print the config file path
+  perch port [name]                      print a project's assigned port (by name, or by current dir)
   perch help                             this text
+  perch <command> help                   detailed help for any command (e.g. perch fav add help, perch place help)
 
 EXAMPLES
   perch acme-api                 start the Acme API in its own tab
@@ -1005,8 +1009,301 @@ cmd_bounds() {
   esac
 }
 
+cmd_port() {
+  # Print the perch-assigned port for a project. With a name, look it up; with no
+  # arg, resolve by the current working directory. Used inside projects' own start
+  # scripts: `next dev -p $(perch port 2>/dev/null || echo 3000)`.
+  local name="${1:-}"
+  if [ -n "$name" ]; then
+    local e; e="$(lookup "$name")" || return 1
+    printf '%s\n' "${e%%|*}"; return 0
+  fi
+  local cwd; cwd="$(pwd -P 2>/dev/null || pwd)"
+  local n p d c dd
+  while IFS='|' read -r n p d c; do
+    case "$n" in ''|\#*) continue ;; esac
+    dd="$(expand_path "$d")"; dd="$(cd "$dd" 2>/dev/null && pwd -P)" || continue
+    if [ "$dd" = "$cwd" ]; then printf '%s\n' "$p"; return 0; fi
+  done < <(config_lines)
+  return 1
+}
+
+cat_rank() { case "$1" in backend) echo 0;; landing) echo 1;; web) echo 2;; admin) echo 3;; metro) echo 4;; *) echo 5;; esac; }
+
+# Auto-group projects by product = the name up to the first "-" (jakstoc-web -> jakstoc).
+cmd_groups() {
+  config_lines | grep -q . || { echo "perch: no projects registered yet ($CONFIG)"; return 0; }
+  local tmp; tmp="$(mktemp)"
+  local name port dir cmd g status
+  while IFS='|' read -r name port dir cmd; do
+    case "$name" in ''|\#*) continue ;; esac
+    g="${name%%-*}"; status='.'
+    if [ "$port" != "-" ] && lsof -ti tcp:"$port" >/dev/null 2>&1; then status='up'; fi
+    printf '%s\t%s\t%s\t%s\n' "$g" "$name" "$port" "$status" >> "$tmp"
+  done < <(config_lines)
+  sort -o "$tmp" "$tmp"
+  awk -F'\t' '
+    NR==FNR { cnt[$1]++; next }
+    { if ($1!=cur){ cur=$1; lbl=toupper(substr($1,1,1)) substr($1,2);
+        printf "\n%s%s\n", lbl, (cnt[$1]>=2 ? "  ("cnt[$1]" projects  ·  start all: perch "$1")" : "") }
+      printf "   %-3s %-27s %s\n", ($4=="up"?"up":""), $2, ($3=="-"?"-":":" $3) }
+  ' "$tmp" "$tmp"
+  rm -f "$tmp"
+}
+
+# Launch every project whose name starts with <prefix> (backend first). `perch jakstoc`
+# or `perch 'jakstoc*'` -> starts jakstoc-api, jakstoc-landing-page, jakstoc-web, jakstoc-admin.
+cmd_start_group() {
+  local pref="${1%\*}"
+  [ -n "$pref" ] || return 1
+  local -a ranked=()
+  local name port dir cmd
+  while IFS='|' read -r name port dir cmd; do
+    case "$name" in ''|\#*) continue ;; esac
+    case "$name" in "$pref"*) ranked+=("$(cat_rank "$(categorize "$name" "$port")")|$name") ;; esac
+  done < <(config_lines)
+  [ "${#ranked[@]}" -gt 0 ] || return 1
+  echo "[perch] starting ${#ranked[@]} project(s) matching '${pref}*' (backend first)…"
+  local line n e p d c
+  while IFS= read -r line; do
+    n="${line#*|}"; e="$(lookup "$n")" || continue
+    IFS='|' read -r p d c <<<"$e"
+    ( launch "$n" "$d" "$p" "$c" ) || echo "[perch] skipped $n (error)"
+  done < <(printf '%s\n' "${ranked[@]}" | sort -n -t'|' -k1,1)
+  return 0
+}
+
+help_for() {
+  local topic="$*"
+  case "$topic" in
+    ""|help) usage ;;
+    fav|favorites|favourites) cat <<'EOF'
+perch fav — manage and launch your favorite projects (a saved shortlist of registered projects).
+
+USAGE
+  perch fav                 open the interactive multi-select picker, then save + launch the chosen set
+  perch fav go              launch the saved favorites, no menu
+  perch fav set <name...>   replace the favorites list with exactly these projects
+  perch fav add <name...>   add projects to favorites (keeps the existing ones)
+  perch fav list            print the saved favorites
+  perch fav clear           empty the favorites list
+  perch fav pick            alias for `perch fav` (the picker)
+
+Favorites are the set that `perch fav go` and `perch place fav` act on.
+Run `perch fav <subcommand> help` for detail on any of these.
+EOF
+    ;;
+    "fav go"|"fav run"|"fav launch") cat <<'EOF'
+perch fav go — launch every project in your favorites, each in its own reused Terminal tab.
+
+USAGE
+  perch fav go
+
+No menu, no prompts. Ports are freed first, tabs are reused by marker, and windows
+auto-place if placement is on. Use `perch fav` when you want to choose interactively.
+EOF
+    ;;
+    "fav set") cat <<'EOF'
+perch fav set — replace the ENTIRE favorites list with the names you pass.
+
+USAGE
+  perch fav set <name> [name...]
+
+Example
+  perch fav set rentwize-metro podzyme-metro rentwize-backend
+
+Overwrites the previous list. Use `perch fav add` to append instead.
+EOF
+    ;;
+    "fav add") cat <<'EOF'
+perch fav add — add one or more projects to favorites without removing the existing ones.
+
+USAGE
+  perch fav add <name> [name...]
+
+Example
+  perch fav add jakstoc-admin jakstoc-web
+
+Each name must be a registered project (see `perch list`). Use `perch fav set` to replace,
+`perch fav clear` to empty.
+EOF
+    ;;
+    "fav list"|"fav ls") cat <<'EOF'
+perch fav list — print the saved favorites, one per line.
+
+USAGE
+  perch fav list            (alias: perch fav ls)
+EOF
+    ;;
+    "fav clear"|"fav reset") cat <<'EOF'
+perch fav clear — remove all favorites. The project registry itself is untouched.
+
+USAGE
+  perch fav clear           (alias: perch fav reset)
+EOF
+    ;;
+    "fav pick"|"fav edit"|"fav choose"|pick|choose) cat <<'EOF'
+perch pick / perch fav — interactive multi-select picker.
+
+USAGE
+  perch pick
+  perch fav
+
+Toggle projects on/off, then confirm to SAVE them as favorites and launch them.
+EOF
+    ;;
+    place|arrange) cat <<'EOF'
+perch place — move open server windows to their assigned desktops and tile them.
+
+USAGE
+  perch place               arrange ALL open registered windows, tile full-width stacked
+  perch place fav           arrange only the windows in your favorites
+  perch place notile        move to desktops but keep free-floating positions (no tiling)
+  perch place fav notile    both of the above
+
+Desktop assignments come from ~/.config/perch/spaces.conf (by category or per-marker).
+Toggle behavior with `perch set placement` and `perch set tile`.
+EOF
+    ;;
+    add) cat <<'EOF'
+perch add — register a project so you can launch it by name.
+
+USAGE
+  perch add <name> <port> <dir> <command...>
+
+Example
+  perch add jakstoc-admin 3212 ~/Documents/.../jakstoc-admin "npx next dev -p 3212"
+
+<port> is freed before launch (use "-" to skip the kill). Saved to ~/.config/perch/projects.conf.
+Undo with `perch remove <name>`.
+EOF
+    ;;
+    remove|rm) cat <<'EOF'
+perch remove — unregister a project. Does not stop it or touch its files.
+
+USAGE
+  perch remove <name>       (alias: perch rm <name>)
+EOF
+    ;;
+    list|ls) cat <<'EOF'
+perch list — show every registered project and whether its port is currently up.
+
+USAGE
+  perch list                (alias: perch ls)
+EOF
+    ;;
+    groups|clusters|cluster|by-product) cat <<'EOF'
+perch groups — list projects grouped by product cluster (auto-grouped by name prefix).
+
+USAGE
+  perch groups              (aliases: perch clusters, perch cluster)
+
+Projects are grouped by the part of the name before the first "-" (jakstoc-web -> jakstoc).
+Each multi-project cluster shows how to start it all at once.
+
+RELATED — start a whole cluster:
+  perch jakstoc             start every jakstoc-* project (backend first)
+  perch 'jakstoc*'          same (quote the * so the shell doesn't expand it)
+EOF
+    ;;
+    stop) cat <<'EOF'
+perch stop — free a project's port (kill whatever is listening on it).
+
+USAGE
+  perch stop <project|port>
+  perch stop all            alias for `perch killall`
+
+Examples
+  perch stop rentwize-web-app
+  perch stop 3001
+EOF
+    ;;
+    killall|kill-all|stopall) cat <<'EOF'
+perch killall — stop running registered servers by freeing their ports.
+
+USAGE
+  perch killall             stop every running registered server
+  perch killall fav         stop only the servers in your favorites
+  perch killall --close     also close their Terminal tabs
+EOF
+    ;;
+    set|settings) cat <<'EOF'
+perch set — view or change optional behavior.
+
+USAGE
+  perch set                       show current settings
+  perch set placement <on|off>    yabai desktop placement on launch/place (default on)
+  perch set tile <on|off>         full-width stacked tiling during place (default on)
+EOF
+    ;;
+    gui|dashboard|ui) cat <<'EOF'
+perch gui — open the web dashboard.
+
+USAGE
+  perch gui                 open http://localhost:7620
+  perch gui stop            stop the dashboard server
+EOF
+    ;;
+    setup) cat <<'EOF'
+perch setup — auto-detect this machine's monitors and write the desktop map (spaces.conf).
+
+USAGE
+  perch setup
+EOF
+    ;;
+    doctor|check) cat <<'EOF'
+perch doctor — check dependencies (osascript, python3, yabai) and configuration.
+
+USAGE
+  perch doctor              (alias: perch check)
+EOF
+    ;;
+    bounds|pos|position) cat <<'EOF'
+perch bounds — manage remembered free-floating window positions.
+
+USAGE
+  perch bounds              list remembered positions
+  perch bounds clear        forget all positions
+  perch bounds clear <name> forget one project's position
+EOF
+    ;;
+    config) cat <<'EOF'
+perch config — print the path to the projects registry file.
+
+USAGE
+  perch config              prints ~/.config/perch/projects.conf
+EOF
+    ;;
+    port) cat <<'EOF'
+perch port — print the perch-assigned port for a project.
+
+USAGE
+  perch port                the port for the project in the current directory
+  perch port <name>         the port for a named registered project
+
+Meant for use inside a project's own start script so it binds perch's port when
+perch is installed, and the framework default otherwise:
+  next dev  -p   $(perch port 2>/dev/null || echo 3000)
+  vite --port    $(perch port 2>/dev/null || echo 5173) --strictPort
+  react-native start --port $(perch port 2>/dev/null || echo 8081)
+  PORT=$(perch port 2>/dev/null || echo 3000) nest start --watch
+EOF
+    ;;
+    *)
+      echo "perch: no help topic '$topic'. Try: perch help" >&2
+      return 1 ;;
+  esac
+}
+
 main() {
   local first="${1:-help}"
+  # nested help at any level: `perch help [path...]`  or  `perch [path...] help|-h|--help`
+  case "$first" in help|-h|--help) shift; help_for "$@"; return ;; esac
+  if [ "$#" -ge 2 ]; then
+    case "${@: -1}" in
+      help|-h|--help) set -- "${@:1:$(($#-1))}"; help_for "$@"; return ;;
+    esac
+  fi
   case "$first" in
     help|-h|--help) usage ;;
     -v|--version) echo "perch $PERCH_VERSION" ;;
@@ -1020,12 +1317,14 @@ main() {
     setup) cmd_setup ;;
     doctor|check) cmd_doctor ;;
     list|ls) cmd_list ;;
+    groups|clusters|cluster|by-product) cmd_groups ;;
     stop)
       shift
       if [ "${1:-}" = "all" ]; then shift; cmd_killall "$@"; else cmd_stop "$@"; fi ;;
     add) shift; cmd_add "$@" ;;
     remove|rm) shift; cmd_remove "$@" ;;
     config) echo "$CONFIG" ;;
+    port) shift; cmd_port "$@" || { echo "perch: no port for $([ -n "${1:-}" ] && echo "'$1'" || echo 'this directory')" >&2; exit 1; } ;;
     *)
       if [ $# -eq 1 ]; then
         local entry
@@ -1033,8 +1332,10 @@ main() {
           local port dir cmd
           IFS='|' read -r port dir cmd <<<"$entry"
           launch "$first" "$dir" "$port" "$cmd"
+        elif cmd_start_group "$first"; then
+          :
         else
-          echo "perch: unknown project '$first' (see: perch list)" >&2
+          echo "perch: unknown project or prefix '$first' (see: perch list / perch groups)" >&2
           exit 1
         fi
       elif [ $# -ge 4 ]; then
