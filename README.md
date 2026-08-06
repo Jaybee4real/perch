@@ -10,7 +10,7 @@ It has since grown a few larger conveniences: a favorites set you launch as a gr
 
 ## Features
 
-- Launch a registered project by name alone: `perch acme-api`.
+- Launch a registered project by name alone: `perch {project-name}`.
 - **Product clusters**: `perch groups` auto-groups projects by name prefix, and `perch jakstoc` starts the whole cluster (backend first).
 - **Port as single source of truth**: `perch port` lets a project's own start script bind its assigned port, with a framework-default fallback when perch isn't installed.
 - One reusable tab per server, matched by tab title. No window pileup.
@@ -39,22 +39,23 @@ macOS only. It drives Terminal.app through AppleScript, so iTerm2 and other emul
 
 ## Quickstart
 
-Say you work on a product called Acme, with a web app, an API, and a mobile app:
+Register a product's servers once — a shared name prefix lets you launch them as a cluster:
 
 ```bash
-perch add acme-web 3000 ~/code/acme/web "yarn dev"
-perch add acme-api 8000 ~/code/acme/api "yarn start:dev"
-perch add acme-metro 8082 ~/code/acme/mobile "yarn start"
+perch add {product}-web   {port} {dir} "{command}"
+perch add {product}-api   {port} {dir} "{command}"
+perch add {product}-metro {port} {dir} "{command}"
 
-perch acme-api          # API starts in a tab titled acme-api
-perch acme-api          # later: same tab, port freed, server restarted in place
-perch stop acme-web     # kill whatever is on 3000
+perch {project-name}       # one server, in a tab titled {project-name}
+perch {project-name}       # again later: same tab, port freed, restarted in place
+perch {product}            # the whole cluster at once (backend first)
+perch stop {project-name}  # free one port
 ```
 
 The ad-hoc form still works for anything unregistered. Pass `-` as the port for tools that do not hold one:
 
 ```bash
-perch scratch-tool ~/code/scratch 5000 "npm run dev"
+perch {marker} {dir} {port} "{command}"
 ```
 
 ## Commands
@@ -144,9 +145,9 @@ name|port|dir|command
 ```
 
 ```
-acme-web|3000|~/code/acme/web|yarn dev
-acme-api|8000|~/code/acme/api|yarn start:dev
-acme-desktop|-|~/code/acme/desktop|$HOME/tools/flutter/bin/flutter run
+{product}-web|3000|~/code/{product}/web|yarn dev
+{product}-api|8000|~/code/{product}/api|yarn start:dev
+{product}-desktop|-|~/code/{product}/desktop|$HOME/tools/flutter/bin/flutter run
 ```
 
 Lines starting with `#` are comments. `~` and `$HOME` both expand. Edit the file directly or use `perch add`.
