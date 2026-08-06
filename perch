@@ -7,7 +7,7 @@
 # Run `perch help` for usage.
 set -euo pipefail
 
-PERCH_VERSION="2.3.0"
+PERCH_VERSION="2.4.0"
 CONFIG="${PERCH_CONFIG:-$HOME/.config/perch/projects.conf}"
 FAVORITES="${PERCH_FAVORITES:-$HOME/.config/perch/favorites}"
 CATEGORIES="${PERCH_CATEGORIES:-$HOME/.config/perch/categories.conf}"
@@ -22,7 +22,9 @@ usage() {
 perch — named dev-server tabs for Terminal.app
 
 USAGE
-  perch <project>                        launch a registered project
+  perch <project>                        launch a registered project (reuses its tab if already open)
+  perch start <project>                  same as `perch <project>` — start it / bring it back up
+  perch restart <project>                restart a project in its existing tab
   perch <prefix>                         start a whole product cluster (e.g. perch jakstoc = every jakstoc-*)
   perch <marker> <dir> <port> <command>  launch anything ad-hoc (port "-" to skip the port kill)
   perch fav                              interactive multi-select picker; saves + launches favorites
@@ -32,8 +34,11 @@ USAGE
   perch fav list                         show saved favorites
   perch fav clear                        remove all favorites
   perch pick                             alias for `perch fav`
-  perch place [fav]                      move open windows to their desktops + tile full-width, stacked
-  perch place [fav] notile               move to desktops but keep free-floating positions
+  perch place [category]                 group ALL server terminals by TYPE onto their mapped desktops + tile (incl. strays)
+  perch place fav                        place only registered favorites by category
+  perch place notile                     group by type but keep free-floating positions
+  perch place empty                      spread ALL open terminals across free/empty desktops (off working desktops)
+  perch autoplace [on|off|status|now]    auto-run `perch place` (group by type) on every new terminal / display change
   perch set                              show optional settings (placement, tile)
   perch set placement <on|off>           toggle yabai desktop placement (default on)
   perch set tile <on|off>                toggle full-width stacked tiling (default on)
@@ -57,10 +62,11 @@ USAGE
   perch <command> help                   detailed help for any command (e.g. perch fav add help, perch place help)
 
 EXAMPLES
-  perch acme-api                 start the Acme API in its own tab
-  perch acme-metro               restart Acme Metro in place
-  perch stop acme-web            free a port by project name
-  perch my-tool ~/code/my-tool 5000 "npm run dev"
+  perch {project-name}           start a registered project in its own tab
+  perch start {project-name}     start it (or bring it back up) in its perch
+  perch restart {project-name}   restart it in place
+  perch stop {project-name}      free its port by project name
+  perch {marker} {dir} {port} "{command}"   launch anything ad-hoc
 
 Projects live in ~/.config/perch/projects.conf, one per line:
   name|port|dir|command
@@ -86,6 +92,94 @@ lookup() {
       return 0
     fi
   done < <(config_lines)
+  return 1
+}
+
+project_names() { config_lines | cut -d'|' -f1; }
+
+# Match a token against project directory basenames, so `perch jakstoc-mobile`
+# finds the repo registered as `jakstoc-metro` that lives in .../jakstoc-mobile.
+# Prints the registered name; fails if there's no match or more than one.
+resolve_by_dirbase() {
+  local wanted="$1" name port dir cmd base match=""
+  while IFS='|' read -r name port dir cmd; do
+    case "$name" in ''|\#*) continue ;; esac
+    base="$(basename "$(expand_path "$dir")")"
+    [ "$base" = "$wanted" ] || continue
+    [ -n "$match" ] && return 1   # ambiguous folder name -> let the caller suggest
+    match="$name"
+  done < <(config_lines)
+  [ -n "$match" ] && { printf '%s' "$match"; return 0; }
+  return 1
+}
+
+# Exact registered name, else the unique folder-name match. Used wherever a single
+# project is resolved (launch + favorites), so favorites-by-folder-name also work.
+resolve_project() {
+  local wanted="$1"
+  lookup "$wanted" >/dev/null 2>&1 && { printf '%s' "$wanted"; return 0; }
+  resolve_by_dirbase "$wanted"
+}
+
+COMMANDS="fav pick place set gui setup doctor list groups autoplace stop killall add remove config port bounds start restart help"
+
+# Read candidate strings on stdin; print up to 3 closest to $1 by edit distance
+# (deduped, nearest first), keeping only ones within a sane threshold.
+closest_of() {
+  awk -v t="$1" '
+    function min3(a,b,c,  m){ m=a; if(b<m)m=b; if(c<m)m=c; return m }
+    function lev(s1,s2,  n,m,i,j,cost){
+      n=length(s1); m=length(s2)
+      if(n==0)return m; if(m==0)return n
+      for(j=0;j<=m;j++) pv[j]=j
+      for(i=1;i<=n;i++){ cv[0]=i
+        for(j=1;j<=m;j++){ cost=(substr(s1,i,1)==substr(s2,j,1))?0:1
+          cv[j]=min3(pv[j]+1, cv[j-1]+1, pv[j-1]+cost) }
+        for(j=0;j<=m;j++) pv[j]=cv[j] }
+      return pv[m]
+    }
+    { name=$0; if(name=="") next
+      d=lev(tolower(t), tolower(name))
+      L=(length(name)>length(t)?length(name):length(t))
+      lim=int(L*0.4); if(lim<2) lim=2
+      if(d<=lim) printf "%d\t%s\n", d, name }
+  ' | sort -n | awk -F'\t' '!seen[$2]++{print $2}' | head -3
+}
+
+closest() { { printf '%s\n' $COMMANDS; project_names; } | closest_of "$1"; }
+
+# Resolution failure: guess what they meant FIRST, then the fallback hints.
+not_found() {
+  local token="$1" guesses line
+  echo "perch: '$token' isn't a known project, cluster, or command." >&2
+  guesses="$(closest "$token")"
+  if [ -n "$guesses" ]; then
+    echo >&2
+    echo "Did you mean:" >&2
+    while IFS= read -r line; do [ -n "$line" ] && printf '    perch %s\n' "$line" >&2; done <<<"$guesses"
+  fi
+  echo >&2
+  echo "  perch list      every registered project (+ live status)" >&2
+  echo "  perch groups    projects grouped by product cluster" >&2
+  echo "  perch help      full command reference" >&2
+}
+
+# Resolve + launch one token, in precedence order:
+#   1. exact registered name   2. product cluster (name prefix)   3. folder name.
+run_project() {
+  local token="$1" entry port dir cmd canon
+  if entry="$(lookup "$token")"; then
+    IFS='|' read -r port dir cmd <<<"$entry"
+    launch "$token" "$dir" "$port" "$cmd"
+    return 0
+  fi
+  cmd_start_group "$token" && return 0
+  if canon="$(resolve_by_dirbase "$token")"; then
+    entry="$(lookup "$canon")"; IFS='|' read -r port dir cmd <<<"$entry"
+    echo "[perch] '$token' → '$canon' (matched by folder name)"
+    launch "$canon" "$dir" "$port" "$cmd"
+    return 0
+  fi
   return 1
 }
 
@@ -380,7 +474,7 @@ cmd_add() {
   [ -n "$cmd" ] || { echo "perch: command required" >&2; exit 1; }
   case "$name" in
     *'|'*|*' '*) echo "perch: name cannot contain spaces or '|'" >&2; exit 1 ;;
-    help|list|stop|add|remove|config) echo "perch: '$name' is a reserved word" >&2; exit 1 ;;
+    help|list|stop|add|remove|config|start|restart) echo "perch: '$name' is a reserved word" >&2; exit 1 ;;
   esac
   if lookup "$name" >/dev/null; then
     echo "perch: '$name' is already registered (perch remove $name first)" >&2
@@ -542,13 +636,13 @@ cmd_fav_go() {
   [ -s "$FAVORITES" ] || { echo "[perch] no favorites yet — run: perch fav"; return 1; }
   local -a FN FP FD FC FK
   local fav entry p d c
+  local canon
   while IFS= read -r fav; do
     [ -n "$fav" ] || continue
-    if entry="$(lookup "$fav")"; then
+    canon="$(resolve_project "$fav")" || { echo "[perch] skip stale favorite '$fav' (not in registry)"; continue; }
+    if entry="$(lookup "$canon")"; then
       IFS='|' read -r p d c <<<"$entry"
-      FN+=("$fav"); FP+=("$p"); FD+=("$d"); FC+=("$c"); FK+=("$(categorize "$fav" "$p")")
-    else
-      echo "[perch] skip stale favorite '$fav' (not in registry)"
+      FN+=("$canon"); FP+=("$p"); FD+=("$d"); FC+=("$c"); FK+=("$(categorize "$canon" "$p")")
     fi
   done < "$FAVORITES"
   local cnt=${#FN[@]}
@@ -622,7 +716,13 @@ cmd_fav() {
     list|ls) cmd_fav_list ;;
     clear|reset) cmd_fav_clear ;;
     ""|pick|edit|choose) cmd_pick ;;
-    *) echo "perch: unknown fav subcommand '$sub' (go|set|add|list|clear|pick)" >&2; exit 1 ;;
+    *)
+      local guess
+      echo "perch: unknown fav subcommand '$sub'." >&2
+      guess="$(printf '%s\n' go set add list clear pick | closest_of "$sub" | head -1)"
+      [ -n "$guess" ] && echo "Did you mean:  perch fav $guess" >&2
+      echo "  subcommands: go · set · add · list · clear · pick" >&2
+      exit 1 ;;
   esac
 }
 
@@ -641,6 +741,7 @@ cmd_killall() {
     [ -s "$FAVORITES" ] || { echo "[perch] no favorites set"; return 0; }
     while IFS= read -r fav; do
       [ -n "$fav" ] || continue
+      fav="$(resolve_project "$fav")" || continue
       if entry="$(lookup "$fav")"; then IFS='|' read -r p d c <<<"$entry"; NAMES+=("$fav"); PORTS+=("$p"); fi
     done < "$FAVORITES"
   else
@@ -746,21 +847,39 @@ OSA
 cmd_place() {
   if ! yabai_available; then echo "[perch] yabai not running (or PERCH_USE_YABAI=0) — nothing to place"; return 0; fi
   ensure_spaces_seeded
-  local onlyfav=0 tile arg
+  local onlyfav=0 placeempty=0 tile arg
   [ "$(pget tile on)" = "off" ] && tile=0 || tile=1
   for arg in "$@"; do
     case "$arg" in
       fav|favorites|favourites|--fav) onlyfav=1 ;;
       notile|--no-tile|free) tile=0 ;;
       tile|--tile) tile=1 ;;
+      empty|spread|--empty) placeempty=1 ;;
     esac
   done
+  # `perch place empty` — spread ALL open terminals across every free desktop
+  # (empty or terminals-only, non-fullscreen), off any working desktop. Categories
+  # are ignored; this is the "use the empty space" mode.
+  if [ "$placeempty" = "1" ]; then
+    if [ -x "$HOME/.local/bin/perch-place-empty" ] && command -v python3 >/dev/null 2>&1; then
+      python3 "$HOME/.local/bin/perch-place-empty"; return $?
+    fi
+    echo "[perch] 'place empty' needs $HOME/.local/bin/perch-place-empty (+ python3)" >&2; return 1
+  fi
+  # `perch place` (default) / `perch place category` — group ALL open server terminals
+  # by TYPE onto their mapped desktops (spaces.conf), INCLUDING unregistered strays
+  # (categorized by marker pattern). `perch place fav` keeps the favorites-only path below.
+  if [ "$onlyfav" != "1" ] && [ -x "$HOME/.local/bin/perch-place-category" ] && command -v python3 >/dev/null 2>&1; then
+    if [ "$tile" = "0" ]; then python3 "$HOME/.local/bin/perch-place-category" notile; else python3 "$HOME/.local/bin/perch-place-category"; fi
+    return $?
+  fi
   local -a NAMES PORTS
   local name port dir cmd fav entry p d c
   if [ "$onlyfav" = "1" ]; then
     [ -s "$FAVORITES" ] || { echo "[perch] no favorites set"; return 0; }
     while IFS= read -r fav; do
       [ -n "$fav" ] || continue
+      fav="$(resolve_project "$fav")" || continue
       if entry="$(lookup "$fav")"; then IFS='|' read -r p d c <<<"$entry"; NAMES+=("$fav"); PORTS+=("$p"); fi
     done < "$FAVORITES"
   else
@@ -1073,6 +1192,75 @@ cmd_start_group() {
   return 0
 }
 
+autoplace_remove_signals() {
+  local L
+  for L in perch_autoplace_new perch_autoplace_disp perch_autoplace_dchg; do
+    yabai -m signal --remove "$L" 2>/dev/null || true
+  done
+}
+autoplace_rc() {
+  # keep ~/.yabairc in sync so the signals survive a yabai restart
+  local rc="$HOME/.yabairc" action="$1" self tmp
+  [ -f "$rc" ] || printf '#!/usr/bin/env sh\n' > "$rc"
+  tmp="$(mktemp)"
+  grep -vE 'perch[-_ ]autoplace|perch: automatic terminal' "$rc" > "$tmp" 2>/dev/null || true
+  mv "$tmp" "$rc"
+  [ "$action" = "add" ] || return 0
+  self="$(command -v perch 2>/dev/null || echo perch)"
+  {
+    echo ""
+    echo "# >>> perch autoplace >>>  (managed by: perch autoplace on/off)"
+    echo "yabai -m signal --add label=perch_autoplace_new  event=window_created app=\"^Terminal\$\" action=\"'$self' autoplace _fire &\""
+    echo "yabai -m signal --add label=perch_autoplace_disp event=display_added                    action=\"'$self' autoplace _fire &\""
+    echo "yabai -m signal --add label=perch_autoplace_dchg event=display_changed                  action=\"'$self' autoplace _fire &\""
+    echo "# <<< perch autoplace <<<"
+  } >> "$rc"
+}
+autoplace_count() {
+  yabai -m signal --list 2>/dev/null | python3 -c 'import sys,json;print(len([s for s in json.load(sys.stdin) if "perch_autoplace" in (s.get("label") or "")]))' 2>/dev/null || echo 0
+}
+cmd_autoplace() {
+  local sub="${1:-status}"; [ "$#" -ge 1 ] && shift
+  case "$sub" in
+    _fire)   # debounced runner invoked by the yabai signals; coalesces bursts
+      local lock=/tmp/perch-autoplace.lock
+      [ -d "$lock" ] && [ -z "$(find "$lock" -mmin -0.5 2>/dev/null)" ] && rmdir "$lock" 2>/dev/null
+      mkdir "$lock" 2>/dev/null || return 0
+      trap 'rmdir /tmp/perch-autoplace.lock 2>/dev/null' EXIT INT TERM
+      sleep 1.2
+      cmd_place category >/dev/null 2>&1 || true
+      ;;
+    now|run|once) cmd_place category ;;
+    on|enable|start)
+      command -v yabai >/dev/null 2>&1 || { echo "[perch] autoplace needs yabai" >&2; return 1; }
+      local self; self="$(command -v perch 2>/dev/null || echo perch)"
+      autoplace_remove_signals
+      yabai -m signal --add label=perch_autoplace_new  event=window_created app="^Terminal$" action="'$self' autoplace _fire &" 2>/dev/null
+      yabai -m signal --add label=perch_autoplace_disp event=display_added                    action="'$self' autoplace _fire &" 2>/dev/null
+      yabai -m signal --add label=perch_autoplace_dchg event=display_changed                  action="'$self' autoplace _fire &" 2>/dev/null
+      autoplace_rc add
+      echo "[perch] autoplace ON — every new terminal / display change re-groups terminals by type ('perch place')"
+      ;;
+    off|disable|stop)
+      autoplace_remove_signals
+      autoplace_rc remove
+      echo "[perch] autoplace OFF (signals removed + ~/.yabairc cleaned)"
+      ;;
+    status|"")
+      local c; c="$(autoplace_count)"
+      if [ "${c:-0}" -gt 0 ] 2>/dev/null; then
+        echo "autoplace: ON ($c signals) → groups terminals by type ('perch place') on new-window / display-change"
+      else
+        echo "autoplace: OFF — turn on with: perch autoplace on"
+      fi
+      grep -q 'perch autoplace' "$HOME/.yabairc" 2>/dev/null \
+        && echo "  persisted in ~/.yabairc (survives yabai restart)" \
+        || echo "  not persisted — run 'perch autoplace on' to make it stick"
+      ;;
+    *) echo "perch: unknown autoplace subcommand '$sub' (on|off|status|now)" >&2; return 1 ;;
+  esac
+}
+
 help_for() {
   local topic="$*"
   case "$topic" in
@@ -1160,9 +1348,26 @@ USAGE
   perch place fav           arrange only the windows in your favorites
   perch place notile        move to desktops but keep free-floating positions (no tiling)
   perch place fav notile    both of the above
+  perch place empty         spread ALL open terminals (registered or not) evenly across every
+                            free desktop — empty or terminals-only, never a working desktop.
+                            Ignores categories; rescues terminals stranded among your other apps.
 
 Desktop assignments come from ~/.config/perch/spaces.conf (by category or per-marker).
 Toggle behavior with `perch set placement` and `perch set tile`.
+EOF
+    ;;
+    start|restart|run) cat <<'EOF'
+perch start / perch restart — (re)start a registered project in its own Terminal tab.
+
+USAGE
+  perch <project>            launch a project (reuses its tab if already open)
+  perch start <project>      same as the bare form — start it, or bring it back up
+  perch restart <project>    restart it in the existing tab
+
+All three free the project's port first, then run its command in the project's
+named tab (reused if it exists, created otherwise). <project> can also be a
+product cluster prefix (perch start jakstoc = every jakstoc-*) or a repo's folder
+name (perch start jakstoc-mobile finds the project registered in that folder).
 EOF
     ;;
     add) cat <<'EOF'
@@ -1190,6 +1395,19 @@ perch list — show every registered project and whether its port is currently u
 
 USAGE
   perch list                (alias: perch ls)
+EOF
+    ;;
+    autoplace|auto) cat <<'EOF'
+perch autoplace — keep terminals arranged automatically (via yabai signals).
+
+USAGE
+  perch autoplace           show status (default)
+  perch autoplace on        install signals: every new Terminal window or display change
+                            re-runs `perch place empty` (debounced). Persisted to ~/.yabairc.
+  perch autoplace off       remove the signals + clean ~/.yabairc
+  perch autoplace now       run `perch place empty` once, right now
+
+Needs yabai. `on` makes it survive a yabai restart; `off` fully disables it.
 EOF
     ;;
     groups|clusters|cluster|by-product) cat <<'EOF'
@@ -1318,6 +1536,11 @@ main() {
     doctor|check) cmd_doctor ;;
     list|ls) cmd_list ;;
     groups|clusters|cluster|by-product) cmd_groups ;;
+    autoplace|auto) shift; cmd_autoplace "$@" ;;
+    start|restart|run)
+      shift
+      [ "$#" -ge 1 ] || { echo "usage: perch $first <project>" >&2; exit 1; }
+      run_project "$1" || { not_found "$1"; exit 1; } ;;
     stop)
       shift
       if [ "${1:-}" = "all" ]; then shift; cmd_killall "$@"; else cmd_stop "$@"; fi ;;
@@ -1327,27 +1550,21 @@ main() {
     port) shift; cmd_port "$@" || { echo "perch: no port for $([ -n "${1:-}" ] && echo "'$1'" || echo 'this directory')" >&2; exit 1; } ;;
     *)
       if [ $# -eq 1 ]; then
-        local entry
-        if entry="$(lookup "$first")"; then
-          local port dir cmd
-          IFS='|' read -r port dir cmd <<<"$entry"
-          launch "$first" "$dir" "$port" "$cmd"
-        elif cmd_start_group "$first"; then
-          :
-        else
-          echo "perch: unknown project or prefix '$first' (see: perch list / perch groups)" >&2
-          exit 1
-        fi
+        run_project "$first" || { not_found "$first"; exit 1; }
       elif [ $# -ge 4 ]; then
         local marker="$1" dir="$2" port="$3"
         shift 3
         launch "$marker" "$dir" "$port" "$*"
       else
-        usage >&2
+        not_found "$first"
         exit 1
       fi
       ;;
   esac
 }
 
-main "$@"
+# Run only when executed directly; `source`-ing (e.g. from test-perch.sh) just
+# loads the functions for testing.
+if [ "${BASH_SOURCE[0]:-$0}" = "${0}" ]; then
+  main "$@"
+fi

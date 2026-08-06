@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.4.0
+
+Folder-name resolution, `start`/`restart`, "did you mean" suggestions, and automatic terminal placement.
+
+### Added
+- **`perch start <project>` / `perch restart <project>`**: explicit verbs for the launch-in-its-tab behavior, alongside the bare `perch <project>`. All three resolve a project name, a product cluster prefix, or a folder name.
+- **Folder-name resolution**: when a token isn't an exact project name or cluster, perch matches it against project directory basenames — so `perch jakstoc-mobile` finds the repo registered as `jakstoc-metro` living in `.../jakstoc-mobile`. Applies to favorites too, so a project favorited by its folder name still launches, places, and stops.
+- **"Did you mean" suggestions**: an unknown project, cluster, or command now guesses the closest match (by edit distance across commands + project names) *before* the fallback hints. Mistyped `fav` subcommands get the same treatment.
+- **`perch autoplace [on|off|status|now]`**: keep terminals arranged automatically — every new Terminal window or display change re-groups them by type (debounced), persisted to `~/.yabairc` so it survives a yabai restart.
+- **`perch place empty`**: spread all open terminals evenly across every free desktop (empty or terminals-only, never a working desktop), ignoring categories — rescues terminals stranded among your other apps.
+- **`perch place [category]`**: the default `perch place` now groups *all* open server terminals by type onto their mapped desktops, including unregistered strays.
+
 ## 2.3.0
 
 Product clusters, prefix launch, port resolution, nested help, and dashboard project-add.
