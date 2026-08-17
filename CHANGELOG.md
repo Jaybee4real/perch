@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.5.0
+
+Terminal-clearing command and a richer favorites listing.
+
+### Added
+- **`perch clear`** (alias `perch cls`): clear the text + scrollback of *every* Terminal tab, like Cmd+K, without stopping anything. Writes the clear escape straight to each tab's tty, so it works even in tabs running a live server (a plain `clear` can't while a process holds the shell).
+- **`perch fav list` is now a table**: PROJECT, PORT, STATUS (`up` / `.` / `stale`), TYPE (category), and COMMAND, with a footer showing how many are up. Favorites stored by folder name resolve to their project; ones that no longer resolve show as `stale`.
+
 ## 2.4.0
 
 Folder-name resolution, `start`/`restart`, "did you mean" suggestions, and automatic terminal placement.

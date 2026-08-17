@@ -7,7 +7,7 @@
 # Run `perch help` for usage.
 set -euo pipefail
 
-PERCH_VERSION="2.4.0"
+PERCH_VERSION="2.5.0"
 CONFIG="${PERCH_CONFIG:-$HOME/.config/perch/projects.conf}"
 FAVORITES="${PERCH_FAVORITES:-$HOME/.config/perch/favorites}"
 CATEGORIES="${PERCH_CATEGORIES:-$HOME/.config/perch/categories.conf}"
@@ -31,7 +31,7 @@ USAGE
   perch fav go                           launch your saved favorites (no menu)
   perch fav set <name...>                replace favorites with the given projects
   perch fav add <name...>                add projects to favorites
-  perch fav list                         show saved favorites
+  perch fav list                         table of favorites (port, status, type, command)
   perch fav clear                        remove all favorites
   perch pick                             alias for `perch fav`
   perch place [category]                 group ALL server terminals by TYPE onto their mapped desktops + tile (incl. strays)
@@ -51,6 +51,7 @@ USAGE
   perch list                             show every registered project and whether it is running
   perch groups                           list projects grouped by product cluster, with ports + status
   perch stop <project|port>              kill whatever holds that project's port
+  perch clear                            clear text + scrollback of ALL Terminal tabs (Cmd+K, keeps servers running)
   perch killall                          stop every running registered server (by port)
   perch killall --close                  ...and close their Terminal tabs too
   perch killall fav                      stop only the servers in your favorites
@@ -474,7 +475,7 @@ cmd_add() {
   [ -n "$cmd" ] || { echo "perch: command required" >&2; exit 1; }
   case "$name" in
     *'|'*|*' '*) echo "perch: name cannot contain spaces or '|'" >&2; exit 1 ;;
-    help|list|stop|add|remove|config|start|restart) echo "perch: '$name' is a reserved word" >&2; exit 1 ;;
+    help|list|stop|add|remove|config|start|restart|clear|cls) echo "perch: '$name' is a reserved word" >&2; exit 1 ;;
   esac
   if lookup "$name" >/dev/null; then
     echo "perch: '$name' is already registered (perch remove $name first)" >&2
@@ -667,7 +668,24 @@ cmd_fav_go() {
 
 cmd_fav_list() {
   [ -s "$FAVORITES" ] || { echo "[perch] no favorites set (perch fav)"; return 0; }
-  echo "[perch] favorites ($(grep -c . "$FAVORITES")):"; sed 's/^/  /' "$FAVORITES"
+  local total up=0
+  total="$(grep -c . "$FAVORITES")"
+  echo "[perch] favorites ($total):"
+  printf '  %-26s %-6s %-7s %-9s %s\n' 'PROJECT' 'PORT' 'STATUS' 'TYPE' 'COMMAND'
+  local fav canon entry port dir cmd status cat
+  while IFS= read -r fav; do
+    [ -n "$fav" ] || continue
+    if canon="$(resolve_project "$fav")" && entry="$(lookup "$canon")"; then
+      IFS='|' read -r port dir cmd <<<"$entry"
+      cat="$(categorize "$canon" "$port")"
+      status='.'
+      if [ "$port" != "-" ] && lsof -ti tcp:"$port" >/dev/null 2>&1; then status='up'; up=$((up+1)); fi
+      printf '  %-26s %-6s %-7s %-9s %s\n' "$fav" "$port" "$status" "$cat" "$cmd"
+    else
+      printf '  %-26s %-6s %-7s %-9s %s\n' "$fav" '-' 'stale' '-' '(not in registry)'
+    fi
+  done < "$FAVORITES"
+  echo "  $up/$total up · launch all: perch fav go"
 }
 
 cmd_fav_clear() {
@@ -839,6 +857,35 @@ end tell
 OSA
     echo "[perch] closed matching Terminal tabs"
   fi
+}
+
+# Clear the visible text + scrollback of every Terminal tab (like Cmd+K), without
+# stopping anything. Writes the clear escape straight to each tab's tty, so it works
+# even in tabs running a live server (a plain `clear` can't — the shell isn't reading).
+cmd_clear() {
+  local ttyfile; ttyfile="$(mktemp)"
+  /usr/bin/osascript >"$ttyfile" 2>/dev/null <<'OSA'
+tell application "Terminal"
+  set outT to ""
+  repeat with w in windows
+    try
+      repeat with t in tabs of w
+        try
+          set outT to outT & (tty of t) & linefeed
+        end try
+      end repeat
+    end try
+  end repeat
+  return outT
+end tell
+OSA
+  local count=0 tt
+  while IFS= read -r tt; do
+    [ -n "$tt" ] || continue
+    printf '\033[H\033[2J\033[3J' > "$tt" 2>/dev/null && count=$((count+1))
+  done < "$ttyfile"
+  rm -f "$ttyfile"
+  echo "[perch] cleared $count terminal tab(s)"
 }
 
 # (Re)assign already-open server windows to their mapped desktops (yabai) without
@@ -1317,10 +1364,13 @@ Each name must be a registered project (see `perch list`). Use `perch fav set` t
 EOF
     ;;
     "fav list"|"fav ls") cat <<'EOF'
-perch fav list — print the saved favorites, one per line.
+perch fav list — show the saved favorites as a table.
 
 USAGE
   perch fav list            (alias: perch fav ls)
+
+Columns: PROJECT, PORT, STATUS (up / . / stale), TYPE (category), COMMAND.
+A favorite that no longer resolves to a registered project shows as "stale".
 EOF
     ;;
     "fav clear"|"fav reset") cat <<'EOF'
@@ -1436,6 +1486,17 @@ Examples
   perch stop 3001
 EOF
     ;;
+    clear|cls) cat <<'EOF'
+perch clear — clear the text and scrollback of EVERY Terminal tab (like Cmd+K).
+
+USAGE
+  perch clear               (alias: perch cls)
+
+Wipes each tab's display without stopping anything — servers keep running. Works
+even in tabs running a live process (writes the clear escape straight to the tty,
+which a plain `clear` can't do while a server holds the shell).
+EOF
+    ;;
     killall|kill-all|stopall) cat <<'EOF'
 perch killall — stop running registered servers by freeing their ports.
 
@@ -1529,6 +1590,7 @@ main() {
     pick|choose) cmd_pick ;;
     bounds|pos|position) shift; cmd_bounds "$@" ;;
     killall|kill-all|stopall) shift; cmd_killall "$@" ;;
+    clear|cls) cmd_clear ;;
     place|arrange) shift; cmd_place "$@" ;;
     set|settings) shift; cmd_set "$@" ;;
     gui|dashboard|ui) shift; cmd_gui "$@" ;;
