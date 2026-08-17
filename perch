@@ -7,7 +7,7 @@
 # Run `perch help` for usage.
 set -euo pipefail
 
-PERCH_VERSION="2.5.0"
+PERCH_VERSION="2.5.1"
 CONFIG="${PERCH_CONFIG:-$HOME/.config/perch/projects.conf}"
 FAVORITES="${PERCH_FAVORITES:-$HOME/.config/perch/favorites}"
 CATEGORIES="${PERCH_CATEGORIES:-$HOME/.config/perch/categories.conf}"
@@ -23,8 +23,8 @@ perch — named dev-server tabs for Terminal.app
 
 USAGE
   perch <project>                        launch a registered project (reuses its tab if already open)
-  perch start <project>                  same as `perch <project>` — start it / bring it back up
-  perch restart <project>                restart a project in its existing tab
+  perch start [project]                  (re)start a project; no arg = this terminal's own server
+  perch restart [project]                restart a project in its tab; no arg = this terminal's own server
   perch <prefix>                         start a whole product cluster (e.g. perch jakstoc = every jakstoc-*)
   perch <marker> <dir> <port> <command>  launch anything ad-hoc (port "-" to skip the port kill)
   perch fav                              interactive multi-select picker; saves + launches favorites
@@ -182,6 +182,49 @@ run_project() {
     return 0
   fi
   return 1
+}
+
+# The perch marker of the Terminal tab this command is running in — its custom
+# title, matched by tty. Lets `perch start|restart|run` with no argument re-run
+# whatever server owns the current tab. Empty if not in a Terminal tab.
+current_marker() {
+  local mytty; mytty="$(tty 2>/dev/null)" || return 1
+  case "$mytty" in /dev/*) ;; *) return 1 ;; esac
+  local esc; esc="$(printf '%s' "$mytty" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+  /usr/bin/osascript 2>/dev/null <<OSA
+tell application "Terminal"
+  repeat with w in windows
+    try
+      repeat with t in tabs of w
+        try
+          if (tty of t) is "$esc" then return (custom title of t)
+        end try
+      end repeat
+    end try
+  end repeat
+  return ""
+end tell
+OSA
+}
+
+# Registered project whose directory is the current working directory, if any.
+name_for_cwd() {
+  local cwd n p d c dd
+  cwd="$(pwd -P 2>/dev/null || pwd)"
+  while IFS='|' read -r n p d c; do
+    case "$n" in ''|\#*) continue ;; esac
+    dd="$(expand_path "$d")"; dd="$(cd "$dd" 2>/dev/null && pwd -P)" || continue
+    [ "$dd" = "$cwd" ] && { printf '%s' "$n"; return 0; }
+  done < <(config_lines)
+  return 1
+}
+
+# Resolve the project for the CURRENT terminal: the tab's perch marker first
+# (its title), else the registered project matching the working directory.
+current_project() {
+  local m; m="$(current_marker)"
+  if [ -n "$m" ] && lookup "$m" >/dev/null 2>&1; then printf '%s' "$m"; return 0; fi
+  name_for_cwd
 }
 
 free_port() {
@@ -1411,11 +1454,16 @@ perch start / perch restart — (re)start a registered project in its own Termin
 
 USAGE
   perch <project>            launch a project (reuses its tab if already open)
-  perch start <project>      same as the bare form — start it, or bring it back up
-  perch restart <project>    restart it in the existing tab
+  perch start [project]      start it, or bring it back up
+  perch restart [project]    restart it in the existing tab
+  perch run [project]        alias for the above
 
-All three free the project's port first, then run its command in the project's
-named tab (reused if it exists, created otherwise). <project> can also be a
+With NO argument, run it from inside a perch-launched tab (or the project's
+directory) and it restarts THAT terminal's own server — resolved from the tab's
+title, else the working directory. Handy after Ctrl+C to relaunch in place.
+
+All forms free the project's port first, then run its command in the project's
+named tab (reused if it exists, created otherwise). A <project> can also be a
 product cluster prefix (perch start jakstoc = every jakstoc-*) or a repo's folder
 name (perch start jakstoc-mobile finds the project registered in that folder).
 EOF
@@ -1601,8 +1649,19 @@ main() {
     autoplace|auto) shift; cmd_autoplace "$@" ;;
     start|restart|run)
       shift
-      [ "$#" -ge 1 ] || { echo "usage: perch $first <project>" >&2; exit 1; }
-      run_project "$1" || { not_found "$1"; exit 1; } ;;
+      if [ "$#" -ge 1 ]; then
+        run_project "$1" || { not_found "$1"; exit 1; }
+      else
+        local here; here="$(current_project)"
+        if [ -n "$here" ]; then
+          echo "[perch] $first '$here' (this terminal)"
+          run_project "$here"
+        else
+          echo "perch: no project for this terminal — not a perch tab, and the current dir isn't a registered project." >&2
+          echo "  give a name (perch $first <project>) or run it from the project's perch tab / directory." >&2
+          exit 1
+        fi
+      fi ;;
     stop)
       shift
       if [ "${1:-}" = "all" ]; then shift; cmd_killall "$@"; else cmd_stop "$@"; fi ;;

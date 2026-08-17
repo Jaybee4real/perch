@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.5.1
+
+### Added
+- **`perch start` / `perch restart` / `perch run` with no argument** re-run the current terminal's own server. Resolves the project from the tab's perch title (matched by tty), else the registered project matching the working directory. Ctrl+C a server, type `perch restart`, and it relaunches in place — no name needed.
+
 ## 2.5.0
 
 Terminal-clearing command and a richer favorites listing.
