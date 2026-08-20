@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.5.2
+
+Health checks, tab completion, URLs/QR, and dependency-aware clusters.
+
+### Added
+- **Launch shows URLs**: the confirmation line now prints the network (LAN) + localhost URLs of the started server (⌘-clickable), instead of echoing just the command.
+- **Health checks**: `perch <project> --wait` launches, then blocks until the port is actually listening (or 40s). `perch list` / `perch fav list` already mark up / down / stale by port.
+- **Dependency-aware clusters**: `perch <prefix>` starts the backend tier first, waits until it's healthy, THEN starts the dependents (web/admin) — no more racing a not-ready API.
+- **`perch open [project]`**: open the project's localhost URL in your browser (no arg = the current terminal's project).
+- **`perch url [project]`**: print the network + localhost URLs, plus a scannable QR of the network URL (needs `qrencode`) to open the dev server on your phone.
+- **`perch completion [zsh|bash]`**: shell tab-completion for command + project names.
+
 ## 2.5.1
 
 ### Added

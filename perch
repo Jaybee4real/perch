@@ -7,7 +7,7 @@
 # Run `perch help` for usage.
 set -euo pipefail
 
-PERCH_VERSION="2.5.1"
+PERCH_VERSION="2.5.2"
 CONFIG="${PERCH_CONFIG:-$HOME/.config/perch/projects.conf}"
 FAVORITES="${PERCH_FAVORITES:-$HOME/.config/perch/favorites}"
 CATEGORIES="${PERCH_CATEGORIES:-$HOME/.config/perch/categories.conf}"
@@ -25,7 +25,11 @@ USAGE
   perch <project>                        launch a registered project (reuses its tab if already open)
   perch start [project]                  (re)start a project; no arg = this terminal's own server
   perch restart [project]                restart a project in its tab; no arg = this terminal's own server
-  perch <prefix>                         start a whole product cluster (e.g. perch jakstoc = every jakstoc-*)
+  perch <project> --wait                 launch and block until the server is actually up
+  perch <prefix>                         start a product cluster (backend-first, waits for it to be healthy)
+  perch open [project]                   open the project's localhost URL in your browser
+  perch url [project]                    print its network + localhost URLs (+ a QR to scan on your phone)
+  perch completion [zsh|bash]            print a shell-completion script (see: perch completion help)
   perch <marker> <dir> <port> <command>  launch anything ad-hoc (port "-" to skip the port kill)
   perch fav                              interactive multi-select picker; saves + launches favorites
   perch fav go                           launch your saved favorites (no menu)
@@ -225,6 +229,50 @@ current_project() {
   local m; m="$(current_marker)"
   if [ -n "$m" ] && lookup "$m" >/dev/null 2>&1; then printf '%s' "$m"; return 0; fi
   name_for_cwd
+}
+
+# The machine's primary LAN/Wi-Fi IPv4 (the address other devices on the router reach),
+# resolved from the default-route interface. Empty if offline.
+primary_lan_ip() {
+  local ifc ip
+  ifc="$(route -n get default 2>/dev/null | awk '/interface:/{print $2; exit}')"
+  [ -n "$ifc" ] && ip="$(ipconfig getifaddr "$ifc" 2>/dev/null)"
+  [ -n "$ip" ] || ip="$(ipconfig getifaddr en0 2>/dev/null)"
+  printf '%s' "$ip"
+}
+
+# --- health checks -----------------------------------------------------------
+# A server is "healthy" once something is listening on its port. Port-less
+# projects (flutter etc.) can't be probed, so they count as healthy.
+is_healthy() {
+  local port="$1"
+  [ "$port" = "-" ] && return 0
+  lsof -ti tcp:"$port" >/dev/null 2>&1
+}
+
+# Poll until the port is listening. wait_healthy <port> [timeout_secs]. 0=up, 1=timeout.
+wait_healthy() {
+  local port="$1" timeout="${2:-40}" ticks=0 max
+  [ "$port" = "-" ] && return 0
+  max=$((timeout * 2))
+  while ! is_healthy "$port"; do
+    sleep 0.5; ticks=$((ticks + 1))
+    [ "$ticks" -ge "$max" ] && return 1
+  done
+  return 0
+}
+
+# Resolve a project (or, with no arg, the current terminal's project) to
+# "<name>\t<port>\t<lan-ip>". rc 1 = not found, rc 2 = project has no port.
+project_url() {
+  local token="$1" canon e port
+  if [ -n "$token" ]; then canon="$(resolve_project "$token")" || return 1
+  else canon="$(current_project)"; fi
+  [ -n "$canon" ] || return 1
+  e="$(lookup "$canon")" || return 1
+  port="${e%%|*}"
+  [ "$port" != "-" ] || return 2
+  printf '%s\t%s\t%s' "$canon" "$port" "$(primary_lan_ip)"
 }
 
 free_port() {
@@ -467,7 +515,21 @@ OSA
     if [ "$created" = "R" ] || [ -z "$stored" ]; then bounds_save "$marker" "$rest"; fi
   fi
 
-  echo "[perch] '$marker' -> $cmd  (tab reused if it existed, else created)"
+  if [ "$port" != "-" ]; then
+    local lan; lan="$(primary_lan_ip)"
+    if [ -n "$lan" ]; then
+      echo "[perch] '$marker' → http://$lan:$port / http://localhost:$port   ($cmd)"
+    else
+      echo "[perch] '$marker' → http://localhost:$port   ($cmd)"
+    fi
+  else
+    echo "[perch] '$marker' → $cmd"
+  fi
+
+  if [ "${WAIT_HEALTHY:-0}" = "1" ] && [ "$port" != "-" ]; then
+    printf "[perch] waiting for :%s to come up… " "$port"
+    if wait_healthy "$port" 40; then echo "ready ✓"; else echo "not up after 40s ✗"; fi
+  fi
 }
 
 cmd_list() {
@@ -518,7 +580,7 @@ cmd_add() {
   [ -n "$cmd" ] || { echo "perch: command required" >&2; exit 1; }
   case "$name" in
     *'|'*|*' '*) echo "perch: name cannot contain spaces or '|'" >&2; exit 1 ;;
-    help|list|stop|add|remove|config|start|restart|clear|cls) echo "perch: '$name' is a reserved word" >&2; exit 1 ;;
+    help|list|stop|add|remove|config|start|restart|clear|cls|open|url|completion) echo "perch: '$name' is a reserved word" >&2; exit 1 ;;
   esac
   if lookup "$name" >/dev/null; then
     echo "perch: '$name' is already registered (perch remove $name first)" >&2
@@ -1273,13 +1335,90 @@ cmd_start_group() {
   done < <(config_lines)
   [ "${#ranked[@]}" -gt 0 ] || return 1
   echo "[perch] starting ${#ranked[@]} project(s) matching '${pref}*' (backend first)…"
-  local line n e p d c
+
+  # Split into the backend tier (rank 0) and everything else, so backends can come
+  # up and pass a health check BEFORE their dependents (web/admin) launch.
+  local line rank n
+  local -a backends=() others=()
   while IFS= read -r line; do
-    n="${line#*|}"; e="$(lookup "$n")" || continue
-    IFS='|' read -r p d c <<<"$e"
-    ( launch "$n" "$d" "$p" "$c" ) || echo "[perch] skipped $n (error)"
+    rank="${line%%|*}"; n="${line#*|}"
+    if [ "$rank" = "0" ]; then backends+=("$n"); else others+=("$n"); fi
   done < <(printf '%s\n' "${ranked[@]}" | sort -n -t'|' -k1,1)
+
+  local e p d c
+  launch_named() { e="$(lookup "$1")" || return; IFS='|' read -r p d c <<<"$e"; ( launch "$1" "$d" "$p" "$c" ) || echo "[perch] skipped $1 (error)"; }
+
+  for n in "${backends[@]}"; do launch_named "$n"; done
+  if [ "${#backends[@]}" -gt 0 ] && [ "${#others[@]}" -gt 0 ]; then
+    echo "[perch] waiting for backend(s) before starting dependents…"
+    for n in "${backends[@]}"; do
+      e="$(lookup "$n")"; p="${e%%|*}"
+      [ "$p" = "-" ] && continue
+      if wait_healthy "$p" 40; then echo "  ✓ $n (:$p) ready"; else echo "  ✗ $n (:$p) not ready — starting the rest anyway"; fi
+    done
+  fi
+  for n in "${others[@]}"; do launch_named "$n"; done
   return 0
+}
+
+# Open a project's local URL in the browser (defaults to the current terminal's project).
+cmd_open() {
+  local info rc canon port
+  info="$(project_url "${1:-}")"; rc=$?
+  [ "$rc" = "2" ] && { echo "perch: '${1:-this project}' has no port to open" >&2; exit 1; }
+  [ "$rc" = "0" ] || { not_found "${1:-this-terminal}"; exit 1; }
+  IFS=$'\t' read -r canon port _ <<<"$info"
+  echo "[perch] opening http://localhost:$port  ($canon)"
+  open "http://localhost:$port" >/dev/null 2>&1
+}
+
+# Print a project's URLs (+ a scannable QR of the LAN URL for phone testing).
+cmd_url() {
+  local info rc canon port lan
+  info="$(project_url "${1:-}")"; rc=$?
+  [ "$rc" = "2" ] && { echo "perch: '${1:-this project}' has no port" >&2; exit 1; }
+  [ "$rc" = "0" ] || { not_found "${1:-this-terminal}"; exit 1; }
+  IFS=$'\t' read -r canon port lan <<<"$info"
+  echo "$canon"
+  [ -n "$lan" ] && echo "  network:   http://$lan:$port"
+  echo "  localhost: http://localhost:$port"
+  if [ -n "$lan" ]; then
+    if command -v qrencode >/dev/null 2>&1; then
+      echo; qrencode -t ANSIUTF8 "http://$lan:$port"; echo "  scan to open on your phone"
+    else
+      echo "  (brew install qrencode for a scannable QR here)"
+    fi
+  fi
+}
+
+# Emit a shell-completion script (project + command names). Install with:
+#   zsh:  echo 'source <(perch completion zsh)'  >> ~/.zshrc
+#   bash: echo 'source <(perch completion bash)' >> ~/.bashrc
+cmd_completion() {
+  local shell="${1:-}"
+  [ -n "$shell" ] || shell="$([ -n "${ZSH_VERSION:-}" ] && echo zsh || echo bash)"
+  case "$shell" in
+    zsh) cat <<'ZSH'
+_perch() {
+  local -a _c _p
+  _c=(start restart run stop clear cls open url list groups fav pick place autoplace set gui setup doctor completion port bounds add remove config killall help)
+  _p=(${(f)"$(command perch _names 2>/dev/null)"})
+  compadd -a _c; compadd -a _p
+}
+compdef _perch perch pz-dev
+ZSH
+      ;;
+    bash) cat <<'BASH'
+_perch() {
+  local cur="${COMP_WORDS[COMP_CWORD]}"
+  local words="start restart run stop clear cls open url list groups fav pick place autoplace set gui setup doctor completion port bounds add remove config killall help $(command perch _names 2>/dev/null)"
+  COMPREPLY=( $(compgen -W "$words" -- "$cur") )
+}
+complete -F _perch perch pz-dev
+BASH
+      ;;
+    *) echo "perch: unknown shell '$shell' (zsh|bash)" >&2; exit 1 ;;
+  esac
 }
 
 autoplace_remove_signals() {
@@ -1468,6 +1607,51 @@ product cluster prefix (perch start jakstoc = every jakstoc-*) or a repo's folde
 name (perch start jakstoc-mobile finds the project registered in that folder).
 EOF
     ;;
+    open) cat <<'EOF'
+perch open — open a project's local URL in your default browser.
+
+USAGE
+  perch open [project]      no arg = the current terminal's project
+
+Uses the project's registered port (http://localhost:<port>). Errors on a
+port-less project (e.g. a Flutter app).
+EOF
+    ;;
+    url|urls) cat <<'EOF'
+perch url — print a project's URLs, with a QR code for phone testing.
+
+USAGE
+  perch url [project]       no arg = the current terminal's project
+
+Shows the network URL (http://<your-lan-ip>:<port>, reachable from your phone on
+the same Wi-Fi) and the localhost URL. If `qrencode` is installed it also prints
+a scannable QR of the network URL — point your phone's camera at it to open the
+dev server on-device. Install it with: brew install qrencode
+EOF
+    ;;
+    completion|completions) cat <<'EOF'
+perch completion — print a shell-completion script for project + command names.
+
+USAGE
+  perch completion [zsh|bash]     (auto-detects your shell if omitted)
+
+Install (once):
+  zsh:   echo 'source <(perch completion zsh)'  >> ~/.zshrc   && exec zsh
+  bash:  echo 'source <(perch completion bash)' >> ~/.bashrc
+
+Then `perch <TAB>` completes commands and your registered project names.
+EOF
+    ;;
+    "health"|wait) cat <<'EOF'
+perch health checks — know when a server is actually up.
+
+  perch <project> --wait    launch, then block until the port is listening (or 40s)
+  perch <prefix>            a cluster starts backends first, waits for them to be
+                            healthy, THEN starts the dependents (web/admin)
+
+`perch list` / `perch fav list` already mark each project up / down / stale by port.
+EOF
+    ;;
     add) cat <<'EOF'
 perch add — register a project so you can launch it by name.
 
@@ -1623,6 +1807,14 @@ EOF
 }
 
 main() {
+  # global --wait / -w flag: block until launched servers pass a health check.
+  WAIT_HEALTHY=0
+  local a; local -a _args=()
+  for a in "$@"; do
+    case "$a" in --wait|-w) WAIT_HEALTHY=1 ;; *) _args+=("$a") ;; esac
+  done
+  set -- "${_args[@]}"
+
   local first="${1:-help}"
   # nested help at any level: `perch help [path...]`  or  `perch [path...] help|-h|--help`
   case "$first" in help|-h|--help) shift; help_for "$@"; return ;; esac
@@ -1639,6 +1831,10 @@ main() {
     bounds|pos|position) shift; cmd_bounds "$@" ;;
     killall|kill-all|stopall) shift; cmd_killall "$@" ;;
     clear|cls) cmd_clear ;;
+    open) shift; cmd_open "${1:-}" ;;
+    url|urls) shift; cmd_url "${1:-}" ;;
+    completion|completions) shift; cmd_completion "$@" ;;
+    _names) project_names ;;
     place|arrange) shift; cmd_place "$@" ;;
     set|settings) shift; cmd_set "$@" ;;
     gui|dashboard|ui) shift; cmd_gui "$@" ;;
