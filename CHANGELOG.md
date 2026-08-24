@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.5.3
+
+### Added
+- **Port in the tab title**: each tab is now titled `<name> - port:<port>`, so you can see which server *and* which port at a glance (port-less projects keep just the name). Tab reuse and `killall --close` matching handle both the old (`<name>`) and new (`<name> - port:<port>`) forms.
+- **Restart refreshes the title**: relaunching into an existing tab now updates its title too (previously only freshly-created tabs got it).
+
 ## 2.5.2
 
 Health checks, tab completion, URLs/QR, and dependency-aware clusters.

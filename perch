@@ -7,7 +7,7 @@
 # Run `perch help` for usage.
 set -euo pipefail
 
-PERCH_VERSION="2.5.2"
+PERCH_VERSION="2.5.3"
 CONFIG="${PERCH_CONFIG:-$HOME/.config/perch/projects.conf}"
 FAVORITES="${PERCH_FAVORITES:-$HOME/.config/perch/favorites}"
 CATEGORIES="${PERCH_CATEGORIES:-$HOME/.config/perch/categories.conf}"
@@ -408,9 +408,14 @@ launch() {
 
   local run="cd \"$dir\" && clear && $cmd"
   esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
-  local marker_esc run_esc
+  # The tab's shown title = marker + port (so you can see which server + which port).
+  # The marker stays the stable key for reuse; the port is a " - port:N" suffix.
+  local title="$marker"
+  [ "$port" != "-" ] && title="$marker - port:$port"
+  local marker_esc run_esc title_esc
   marker_esc="$(esc "$marker")"
   run_esc="$(esc "$run")"
+  title_esc="$(esc "$title")"
 
   local yon=0
   yabai_available && yon=1
@@ -430,6 +435,7 @@ launch() {
   /usr/bin/osascript >"$tmpout" 2>/dev/null <<OSA
 tell application "Terminal"
   set theMarker to "$marker_esc"
+  set theTitle to "$title_esc"
   set theCmd to "$run_esc"
   set hasBounds to $has_bounds
   set bx1 to $bx1
@@ -443,7 +449,7 @@ tell application "Terminal"
     try
       repeat with t in tabs of w
         try
-          if (custom title of t) is theMarker then
+          if ((custom title of t) is theMarker) or ((custom title of t) starts with (theMarker & " - port:")) then
             set foundTab to t
             set foundWin to w
             exit repeat
@@ -457,6 +463,7 @@ tell application "Terminal"
   set createFlag to "R"
   if foundTab is not missing value then
     do script theCmd in foundTab
+    set custom title of foundTab to theTitle
     set selected of foundTab to true
     try
       set index of foundWin to 1
@@ -465,7 +472,7 @@ tell application "Terminal"
   else
     set createFlag to "C"
     set newTab to do script theCmd
-    set custom title of newTab to theMarker
+    set custom title of newTab to theTitle
     try
       set targetWin to window 1
     end try
@@ -897,6 +904,10 @@ cmd_killall() {
     # 1) collect the tty of every tab in matching windows
     local ttyfile; ttyfile="$(mktemp)"
     /usr/bin/osascript >"$ttyfile" 2>/dev/null <<OSA
+on titleBase(tt)
+  if tt contains " - port:" then return text 1 thru ((offset of " - port:" in tt) - 1) of tt
+  return tt
+end titleBase
 tell application "Terminal"
   set markerList to {$listexpr}
   set outT to ""
@@ -905,7 +916,7 @@ tell application "Terminal"
       set matched to false
       repeat with t in tabs of w
         try
-          if markerList contains (custom title of t) then set matched to true
+          if markerList contains (my titleBase(custom title of t)) then set matched to true
         end try
       end repeat
       if matched then
@@ -938,6 +949,10 @@ OSA
 
     # 3) close the now-idle windows (no prompt)
     /usr/bin/osascript >/dev/null 2>&1 <<OSA
+on titleBase(tt)
+  if tt contains " - port:" then return text 1 thru ((offset of " - port:" in tt) - 1) of tt
+  return tt
+end titleBase
 tell application "Terminal"
   set markerList to {$listexpr}
   set toClose to {}
@@ -945,7 +960,7 @@ tell application "Terminal"
     try
       repeat with t in tabs of w
         try
-          if markerList contains (custom title of t) then
+          if markerList contains (my titleBase(custom title of t)) then
             set end of toClose to w
             exit repeat
           end if
