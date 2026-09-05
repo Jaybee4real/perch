@@ -7,7 +7,7 @@
 # Run `perch help` for usage.
 set -euo pipefail
 
-PERCH_VERSION="2.5.3"
+PERCH_VERSION="2.5.4"
 CONFIG="${PERCH_CONFIG:-$HOME/.config/perch/projects.conf}"
 FAVORITES="${PERCH_FAVORITES:-$HOME/.config/perch/favorites}"
 CATEGORIES="${PERCH_CATEGORIES:-$HOME/.config/perch/categories.conf}"
@@ -16,6 +16,7 @@ BOUNDS="${PERCH_BOUNDS:-$HOME/.config/perch/window-bounds}"
 REMEMBER_BOUNDS="${PERCH_REMEMBER_BOUNDS:-1}"
 SPACES="${PERCH_SPACES:-$HOME/.config/perch/spaces.conf}"
 SETTINGS="${PERCH_SETTINGS:-$HOME/.config/perch/settings}"
+LOGS="${PERCH_LOGS:-$HOME/.config/perch/logs}"
 
 usage() {
   cat <<'EOF'
@@ -407,6 +408,13 @@ launch() {
   free_port "$port"
 
   local run="cd \"$dir\" && clear && $cmd"
+  # Metro prints the RN app's client console logs to its own terminal; tee them to a
+  # per-marker logfile (append) so there's a persistent record across restarts. A plain
+  # pipe keeps Metro's stdin on the TTY, so its interactive keys (r/reload, d/devmenu) work.
+  if [ "$(categorize "$marker" "$port")" = "metro" ]; then
+    mkdir -p "$LOGS"
+    run="cd \"$dir\" && clear && $cmd 2>&1 | tee -a \"$LOGS/$marker.log\""
+  fi
   esc() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
   # The tab's shown title = marker + port (so you can see which server + which port).
   # The marker stays the stable key for reuse; the port is a " - port:N" suffix.

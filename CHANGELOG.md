@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.5.4
+
+### Added
+- **Metro appends client logs**: Metro servers now tee their output — which includes the React Native app's client `console.log` — to a per-marker logfile at `~/.config/perch/logs/<marker>.log` (append, so it survives restarts). Uses a plain pipe so Metro keeps its interactive TTY (r/reload, d/devmenu still work). Only applies to metro-category servers; everything else launches unchanged.
+
 ## 2.5.3
 
 ### Added
