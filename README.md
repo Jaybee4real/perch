@@ -1,3 +1,5 @@
+<img src=".github/banner.png" alt="perch by Novacraft" width="100%">
+
 # perch
 
 Start, restart, and arrange dev servers in named, reusable macOS Terminal tabs.
