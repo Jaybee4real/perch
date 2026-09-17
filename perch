@@ -7,7 +7,7 @@
 # Run `perch help` for usage.
 set -euo pipefail
 
-PERCH_VERSION="2.5.4"
+PERCH_VERSION="2.7.0"
 CONFIG="${PERCH_CONFIG:-$HOME/.config/perch/projects.conf}"
 FAVORITES="${PERCH_FAVORITES:-$HOME/.config/perch/favorites}"
 CATEGORIES="${PERCH_CATEGORIES:-$HOME/.config/perch/categories.conf}"
@@ -17,6 +17,13 @@ REMEMBER_BOUNDS="${PERCH_REMEMBER_BOUNDS:-1}"
 SPACES="${PERCH_SPACES:-$HOME/.config/perch/spaces.conf}"
 SETTINGS="${PERCH_SETTINGS:-$HOME/.config/perch/settings}"
 LOGS="${PERCH_LOGS:-$HOME/.config/perch/logs}"
+PARKED="${PERCH_PARKED:-$HOME/.config/perch/parked}"
+APPS="${PERCH_APPS:-$HOME/.config/perch/apps.conf}"
+AGENTS_SESSION="${PERCH_AGENTS_SESSION:-perch-agents}"
+AGENTS_TMUX_CONF="${PERCH_AGENTS_TMUX_CONF:-$HOME/.config/perch/agents.tmux.conf}"
+AGENT_WORKING_SECS="${PERCH_AGENT_WORKING_SECS:-6}"
+AGENT_CLIS="${PERCH_AGENT_CLIS:-claude codex cursor-agent opencode aider gemini grok copilot goose amp cline qwen crush droid}"
+PARK_EXCLUDE="${PERCH_PARK_EXCLUDE:-$HOME/.config/perch/park-exclude}"
 
 usage() {
   cat <<'EOF'
@@ -43,8 +50,22 @@ USAGE
   perch place fav                        place only registered favorites by category
   perch place notile                     group by type but keep free-floating positions
   perch place empty                      spread ALL open terminals across free/empty desktops (off working desktops)
-  perch autoplace [on|off|status|now]    auto-run `perch place` (group by type) on every new terminal / display change
-  perch set                              show optional settings (placement, tile)
+  perch autoplace [on|off|status|now]    auto-run `perch place` on new terminal / display change; parks on monitor disconnect
+  perch park                             minimize windows (terminals + pinned apps) a disconnected monitor dumped onto the laptop display
+  perch unpark                           restore parked windows and re-place them on their display
+  perch reap [--dry]                     kill servers on a registered port running in NO perch tab (orphans)
+  perch bar [open|build|on|off|stop]     menu bar (toolbar) app: start/restart/place projects + live net speed from the menu bar
+  perch apps [list|add|remove|capture]   also pin OTHER apps (Chrome, Slack…) to a display:space; place + park cover them
+  perch apps park "<App>" on|off         exempt one app from parking — off = it stays in place when a monitor disconnects
+
+  AGENTS (herd coding agents — tmux-backed, survive closing Terminal)
+  perch agent <name> [dir] [command]     launch/reuse a coding agent (default command = first installed: claude, codex, …)
+  perch agents                           list agents with live status (● working / ● blocked / ● idle)
+  perch cockpit                          attach the whole herd as tabs in ONE terminal (themed status bar)
+  perch agent stop|restart <name>        stop or restart one;   perch agents stop [name] | killall
+  perch agents detect                    list the coding-agent CLIs installed on this machine
+
+  perch set                              show optional settings (placement, tile, park)
   perch set placement <on|off>           toggle yabai desktop placement (default on)
   perch set tile <on|off>                toggle full-width stacked tiling (default on)
   perch gui                              open the web dashboard (http://localhost:7620)
@@ -547,7 +568,21 @@ OSA
   fi
 }
 
+listening_ports() {
+  netstat -an -p tcp 2>/dev/null | awk '/LISTEN/{n=split($4,a,".");print a[n]}' | sort -u | tr '\n' ' '
+}
+port_up() { case " $2 " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 cmd_list() {
+  local up; up="$(listening_ports)"
+  if [ "${1:-}" = "--plain" ] || [ "${1:-}" = "--tsv" ]; then
+    local name port dir cmd status
+    while IFS='|' read -r name port dir cmd; do
+      status=down; [ "$port" != "-" ] && port_up "$port" "$up" && status=up
+      categorize_into "$name" "$port"
+      printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$port" "$status" "$CAT_RESULT" "$(park_excluded "$name" && echo off || echo on)"
+    done < <(config_lines)
+    return 0
+  fi
   if ! config_lines | grep -q .; then
     echo "perch: no projects registered yet (config: $CONFIG)"
     echo "Register one with: perch add <name> <port> <dir> <command...>"
@@ -556,10 +591,7 @@ cmd_list() {
   printf '%-28s %-6s %-8s %s\n' 'PROJECT' 'PORT' 'STATUS' 'COMMAND'
   local name port dir cmd status
   while IFS='|' read -r name port dir cmd; do
-    status='.'
-    if [ "$port" != "-" ] && lsof -ti tcp:"$port" >/dev/null 2>&1; then
-      status='up'
-    fi
+    status='.'; [ "$port" != "-" ] && port_up "$port" "$up" && status='up'
     printf '%-28s %-6s %-8s %s\n' "$name" "$port" "$status" "$cmd"
   done < <(config_lines)
 }
@@ -628,30 +660,41 @@ cat_label() {
   esac
 }
 
+CAT_OVERRIDES=""; CAT_OVERRIDES_LOADED=0; CAT_RESULT=""
+# Sets CAT_RESULT and returns 0 when categories.conf overrides this project (no forks).
 cat_override() {
-  [ -f "$CATEGORIES" ] || return 1
+  if [ "$CAT_OVERRIDES_LOADED" = "0" ]; then
+    CAT_OVERRIDES_LOADED=1
+    [ -f "$CATEGORIES" ] && CAT_OVERRIDES="$(grep -vE '^\s*(#|$)' "$CATEGORIES" 2>/dev/null || true)"
+  fi
+  [ -n "$CAT_OVERRIDES" ] || return 1
   local wanted="$1" n c
   while IFS='|' read -r n c; do
-    [ "$n" = "$wanted" ] && { printf '%s' "$c"; return 0; }
-  done < <(grep -vE '^\s*(#|$)' "$CATEGORIES")
+    [ "$n" = "$wanted" ] && { CAT_RESULT="$c"; return 0; }
+  done <<<"$CAT_OVERRIDES"
   return 1
 }
-
-categorize() {
-  local name="$1" port="$2" lc ovr
-  if ovr="$(cat_override "$name")"; then printf '%s' "$ovr"; return; fi
-  lc="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')"
-  case "$lc" in *metro*) echo metro; return ;; esac
-  case "$lc" in *admin*) echo admin; return ;; esac
-  case "$lc" in *backend*|*-api) echo backend; return ;; esac
-  case "$port" in
-    8000|8001|8080) echo backend; return ;;
-    8082|8083|8084|8085|8086|8087|8088|8089|8090|8091) echo metro; return ;;
-  esac
-  case "$lc" in *landing*|*portfolio*|*website*) echo landing; return ;; esac
-  [ "$port" = "-" ] && { echo other; return; }
-  echo web
+# Fork-free categorize: sets CAT_RESULT. Same precedence as before:
+# override > name(metro/admin/backend|-api) > port(backend/metro ranges) > name(landing) > "-"=other > web
+categorize_into() {
+  local name="$1" port="$2" nc=0
+  if cat_override "$name"; then return 0; fi
+  if shopt -q nocasematch; then nc=1; fi
+  shopt -s nocasematch
+  case "$name" in *metro*) CAT_RESULT=metro ;; *admin*) CAT_RESULT=admin ;; *backend*|*-api) CAT_RESULT=backend ;; *) CAT_RESULT="" ;; esac
+  if [ -z "$CAT_RESULT" ]; then
+    case "$port" in 8000|8001|8080) CAT_RESULT=backend ;; 8082|8083|8084|8085|8086|8087|8088|8089|8090|8091) CAT_RESULT=metro ;; esac
+  fi
+  if [ -z "$CAT_RESULT" ]; then
+    case "$name" in *landing*|*portfolio*|*website*) CAT_RESULT=landing ;; esac
+  fi
+  if [ -z "$CAT_RESULT" ]; then
+    if [ "$port" = "-" ]; then CAT_RESULT=other; else CAT_RESULT=web; fi
+  fi
+  [ "$nc" = "1" ] || shopt -u nocasematch
+  return 0
 }
+categorize() { categorize_into "$1" "$2"; printf '%s' "$CAT_RESULT"; }
 
 # Interactive multi-select picker. Pre-checks saved favorites, saves the new
 # selection, and launches everything in CAT_ORDER (Metro → Landing → Web → Backend → Admin).
@@ -1046,7 +1089,7 @@ cmd_place() {
   # (categorized by marker pattern). `perch place fav` keeps the favorites-only path below.
   if [ "$onlyfav" != "1" ] && [ -x "$HOME/.local/bin/perch-place-category" ] && command -v python3 >/dev/null 2>&1; then
     if [ "$tile" = "0" ]; then python3 "$HOME/.local/bin/perch-place-category" notile; else python3 "$HOME/.local/bin/perch-place-category"; fi
-    return $?
+    local rc=$?; place_apps; return $rc
   fi
   local -a NAMES PORTS
   local name port dir cmd fav entry p d c
@@ -1106,6 +1149,7 @@ cmd_place() {
       echo "[perch] placed ${PN[$k]} → desktop ${PS[$k]}"
     done
   fi
+  place_apps
   echo "[perch] place: arranged $placed window(s)$( [ "$tile" = "1" ] && echo ' (full-width, stacked)' )"
 }
 
@@ -1114,17 +1158,19 @@ cmd_set() {
     echo "[perch] settings ($SETTINGS):"
     echo "  placement = $(pget placement on)    # assign windows to desktops (needs yabai)"
     echo "  tile      = $(pget tile on)    # full-width, stacked tiling on each desktop"
-    echo "toggle with: perch set placement off   |   perch set tile off"
+    echo "  park      = $(pget park on)    # park windows a monitor unplug dumps onto the laptop (needs yabai)"
+    echo "toggle with: perch set placement off   |   perch set tile off   |   perch set park off"
     return 0
   fi
   local key="$1" val="${2:-}"
   case "$key" in
-    placement|tile)
+    placement|tile|park)
       case "$val" in
+        "") pget "$key" on; echo ;;
         on|off) pset "$key" "$val"; echo "[perch] $key = $val" ;;
         *) echo "usage: perch set $key <on|off>" >&2; exit 1 ;;
       esac ;;
-    *) echo "perch: unknown setting '$key' (placement|tile)" >&2; exit 1 ;;
+    *) echo "perch: unknown setting '$key' (placement|tile|park)" >&2; exit 1 ;;
   esac
 }
 
@@ -1444,9 +1490,486 @@ BASH
   esac
 }
 
+# ---------- other apps: keep non-Terminal app windows on their display ----------
+# apps.conf maps an app to a display:space, e.g.  Slack|3:1  ·  Google Chrome|2:1
+# `perch place` then also sends those apps' windows there, and park/unpark cover them.
+yabai_app_windows() {
+  yabai -m query --windows 2>/dev/null | python3 -c 'import json,sys
+a=sys.argv[1]
+try: ws=json.load(sys.stdin)
+except Exception: sys.exit(0)
+for w in ws:
+    if w.get("app")==a: print(w["id"])' "$1" 2>/dev/null
+}
+apps_lines() { [ -f "$APPS" ] || return 0; grep -vE '^\s*(#|$)' "$APPS" || true; }
+# park exclusions: names (pinned apps or terminal markers) that stay put on monitor disconnect
+park_excluded() { [ -f "$PARK_EXCLUDE" ] && grep -qxF "$1" "$PARK_EXCLUDE" 2>/dev/null; }
+park_exclude_add() { mkdir -p "$(dirname "$PARK_EXCLUDE")"; touch "$PARK_EXCLUDE"; grep -qxF "$1" "$PARK_EXCLUDE" 2>/dev/null || printf '%s\n' "$1" >> "$PARK_EXCLUDE"; }
+park_exclude_remove() { [ -f "$PARK_EXCLUDE" ] || return 0; grep -vxF "$1" "$PARK_EXCLUDE" > "$PARK_EXCLUDE.tmp" 2>/dev/null || true; mv "$PARK_EXCLUDE.tmp" "$PARK_EXCLUDE"; }
+place_apps() {
+  yabai_available || return 0
+  local app spec sp wid n=0
+  while IFS='|' read -r app spec; do
+    app="$(printf '%s' "$app" | sed 's/^ *//;s/ *$//')"; spec="$(printf '%s' "$spec" | tr -d ' ')"
+    [ -n "$app" ] && [ -n "$spec" ] || continue
+    sp="$(resolve_space "$spec" || true)"; [ -n "$sp" ] || continue
+    while IFS= read -r wid; do
+      [ -n "$wid" ] || continue
+      yabai -m window "$wid" --space "$sp" >/dev/null 2>&1 && n=$((n+1))
+    done < <(yabai_app_windows "$app")
+  done < <(apps_lines)
+  [ "$n" -gt 0 ] && echo "[perch] placed $n app window(s)"
+  return 0
+}
+cmd_apps() {
+  local sub="${1:-list}"; [ "$#" -ge 1 ] && shift
+  case "$sub" in
+    list|"")
+      echo "[perch] pinned apps ($APPS):"
+      if apps_lines | grep -q .; then
+        while IFS='|' read -r app spec; do
+          if park_excluded "$app"; then printf '  %-22s %-8s  park: off (stays put on disconnect)\n' "$app" "$spec"
+          else printf '  %-22s %-8s  park: on\n' "$app" "$spec"; fi
+        done < <(apps_lines)
+      else echo "  (none — add with: perch apps add \"Google Chrome\" 2:1)"; fi
+      ;;
+    --plain|plain)
+      while IFS='|' read -r app spec; do
+        printf '%s\t%s\t%s\n' "$app" "$spec" "$(park_excluded "$app" && echo off || echo on)"
+      done < <(apps_lines) ;;
+    park|nopark)
+      local app="${1:?usage: perch apps park \"App Name\" on|off}"; local state="${2:-toggle}"
+      case "$state" in
+        off|no|exclude|keep|stay) park_exclude_add "$app"; echo "[perch] '$app' will NOT be parked on monitor disconnect — it stays in place" ;;
+        on|yes|include|drop)      park_exclude_remove "$app"; echo "[perch] '$app' will be parked on monitor disconnect (default)" ;;
+        toggle)
+          if park_excluded "$app"; then park_exclude_remove "$app"; echo "[perch] '$app' park: on (will be parked)"
+          else park_exclude_add "$app"; echo "[perch] '$app' park: off (stays in place)"; fi ;;
+        *) echo "usage: perch apps park \"App Name\" on|off" >&2; return 1 ;;
+      esac ;;
+    add|set)
+      local app="${1:?usage: perch apps add \"App Name\" <display:space>}"; local spec="${2:?usage: perch apps add \"App Name\" <display:space>}"
+      case "$spec" in *:*) ;; *) echo "perch: spec must be display:space, e.g. 2:1" >&2; return 1 ;; esac
+      mkdir -p "$(dirname "$APPS")"; touch "$APPS"
+      grep -vE "^${app}\\|" "$APPS" > "$APPS.tmp" 2>/dev/null || true; mv "$APPS.tmp" "$APPS"
+      printf '%s|%s\n' "$app" "$spec" >> "$APPS"
+      echo "[perch] pinned '$app' → $spec (run 'perch place' or it applies on next autoplace)"
+      ;;
+    remove|rm|del)
+      local app="${1:?usage: perch apps remove \"App Name\"}"
+      [ -f "$APPS" ] && { grep -vE "^${app}\\|" "$APPS" > "$APPS.tmp" 2>/dev/null || true; mv "$APPS.tmp" "$APPS"; }
+      echo "[perch] unpinned '$app'"
+      ;;
+    capture|snapshot)
+      yabai_available || { echo "[perch] yabai not running" >&2; return 1; }
+      mkdir -p "$(dirname "$APPS")"
+      yabai -m query --windows 2>/dev/null | PERCH_APPS="$APPS" python3 -c '
+import json,sys,os,collections
+try: ws=json.load(sys.stdin)
+except Exception: sys.exit(0)
+# non-fullscreen desktop ordinal per (display,space)
+disp_spaces=collections.defaultdict(list)
+for w in ws:
+    pass
+sp_by_disp=collections.defaultdict(set)
+for w in ws:
+    sp_by_disp[w.get("display")].add(w.get("space"))
+# need full space list w/ fullscreen flag; approximate ordinal from spaces present
+spaces=json.loads(os.popen("yabai -m query --spaces").read() or "[]")
+order=collections.defaultdict(list)
+for sp in sorted(spaces,key=lambda s:s["index"]):
+    if not sp.get("is-native-fullscreen"): order[sp["display"]].append(sp["index"])
+def ordinal(disp,space):
+    lst=order.get(disp,[])
+    return lst.index(space)+1 if space in lst else None
+seen={}
+SKIP={"Terminal","PerchBar","Simulator","Window Server","Control Center","Notification Center","Dock","loginwindow","MobileDeviceUpdater","CoreSimulator"}
+for w in ws:
+    app=w.get("app")
+    if not app or app in SKIP or app in seen: continue
+    if w.get("is-native-fullscreen"): continue
+    d=w.get("display"); o=ordinal(d,w.get("space"))
+    if d and o: seen[app]=f"{d}:{o}"
+out=os.environ["PERCH_APPS"]
+with open(out,"w") as f:
+    for app,spec in sorted(seen.items()): f.write(f"{app}|{spec}\n")
+print(f"[perch] captured {len(seen)} app(s) at their current positions -> {out}")
+for app,spec in sorted(seen.items()): print(f"  {app} -> {spec}")
+'
+      ;;
+    *) echo "perch: unknown apps subcommand '$sub' (list|add|remove|park|capture)" >&2; return 1 ;;
+  esac
+}
+# ---------- reap: kill servers on a registered port but in NO perch tab ----------
+# Orphan = a perch tab was closed while its server ran; the process reparents to init
+# (ppid 1, tty ??) and keeps the port, so a later restart lands a dead duplicate.
+cmd_reap() {
+  set +e +o pipefail
+  local dry=0
+  case "${1:-}" in --dry|-n|dry) dry=1 ;; esac
+  local tabttys
+  tabttys="$(osascript -e 'tell application "Terminal" to get tty of tabs of windows' 2>/dev/null | tr ',' '\n' | sed 's#/dev/##g' | tr -d ' ')"
+  local name port dir cmd pid found=0
+  while IFS='|' read -r name port dir cmd; do
+    [ "$port" = "-" ] && continue
+    pid="$(lsof -ti tcp:"$port" -sTCP:LISTEN 2>/dev/null | head -1)"
+    [ -n "$pid" ] || continue
+    local walk="$pid" attached=0 guard=0 tv
+    while [ -n "$walk" ] && [ "$walk" != "1" ] && [ "$walk" != "0" ] && [ "$guard" -lt 12 ]; do
+      tv="$(ps -o tty= -p "$walk" 2>/dev/null | tr -d ' ')"
+      if [ -n "$tv" ] && [ "$tv" != "??" ] && printf '%s\n' "$tabttys" | grep -qx "$tv"; then attached=1; break; fi
+      walk="$(ps -o ppid= -p "$walk" 2>/dev/null | tr -d ' ')"; guard=$((guard+1))
+    done
+    if [ "$attached" = "0" ]; then
+      found=$((found+1))
+      echo "  orphan: $name -> port $port (pid $pid, $(basename "$dir")) - running in no perch tab"
+      if [ "$dry" = "0" ]; then lsof -ti tcp:"$port" -sTCP:LISTEN 2>/dev/null | xargs kill -9 2>/dev/null; echo "    -> reaped"; fi
+    fi
+  done < <(config_lines)
+  if [ "$found" = "0" ]; then echo "[perch] no orphans - every registered server is attached to its terminal"
+  elif [ "$dry" = "1" ]; then echo "[perch] $found orphan(s) - run 'perch reap' to kill them"
+  else echo "[perch] reaped $found orphan(s); restart any you still want with 'perch <name>'"; fi
+}
+
+# ---------- park: hide terminals a disconnected monitor dumped onto the laptop ----------
+# When an external display disconnects, macOS collapses its windows onto the main
+# (laptop) display. `park` minimizes every perch terminal that is MAPPED to an
+# external display but is now SITTING on the main display; `unpark` restores them
+# and re-places them. Checking the window's real display (not display indices)
+# keeps this correct even when yabai renumbers displays after a middle monitor drops.
+window_display() {
+  yabai -m query --windows --window "$1" 2>/dev/null | python3 -c 'import json,sys
+try: print(json.load(sys.stdin)["display"])
+except Exception: pass' 2>/dev/null
+}
+cmd_park() {
+  yabai_available || { echo "[perch] yabai not running — nothing to park"; return 0; }
+  if [ "${1:-}" = "_auto" ] && [ "$(pget park on)" = "off" ]; then return 0; fi
+  local name port dir cmd cat spec mapped wid cur n=0
+  mkdir -p "$(dirname "$PARKED")"; touch "$PARKED"
+  while IFS='|' read -r name port dir cmd; do
+    park_excluded "$name" && continue
+    cat="$(categorize "$name" "$port")"
+    spec="$(space_for "$name" "$cat" || true)"
+    case "$spec" in *:*) mapped="${spec%%:*}" ;; *) continue ;; esac
+    [ "$mapped" != "1" ] || continue
+    wid="$(yabai_window_id "$name" || true)"; [ -n "$wid" ] || continue
+    cur="$(window_display "$wid" || true)"
+    [ "$cur" = "1" ] || continue
+    grep -qxF "$name|$wid|$spec" "$PARKED" 2>/dev/null || printf '%s|%s|%s\n' "$name" "$wid" "$spec" >> "$PARKED"
+    yabai -m window "$wid" --minimize >/dev/null 2>&1 && n=$((n+1))
+  done < <(config_lines)
+  local app appwid
+  while IFS='|' read -r app spec; do
+    app="$(printf '%s' "$app" | sed 's/^ *//;s/ *$//')"; spec="$(printf '%s' "$spec" | tr -d ' ')"
+    park_excluded "$app" && continue
+    case "$spec" in *:*) mapped="${spec%%:*}" ;; *) continue ;; esac
+    [ "$mapped" != "1" ] || continue
+    while IFS= read -r appwid; do
+      [ -n "$appwid" ] || continue
+      cur="$(window_display "$appwid" || true)"; [ "$cur" = "1" ] || continue
+      grep -qxF "$app|$appwid|$spec" "$PARKED" 2>/dev/null || printf '%s|%s|%s\n' "$app" "$appwid" "$spec" >> "$PARKED"
+      yabai -m window "$appwid" --minimize >/dev/null 2>&1 && n=$((n+1))
+    done < <(yabai_app_windows "$app")
+  done < <(apps_lines)
+  echo "[perch] parked $n window(s) displaced onto the main display ($(grep -c . "$PARKED" 2>/dev/null || echo 0) tracked)"
+}
+# Restore parked windows whose mapped display is back; keep the rest tracked.
+# Safe to run on any signal: nothing is restored while its monitor is still gone.
+unpark_windows() {
+  [ -s "$PARKED" ] || { printf '0'; return 0; }
+  local name wid spec n=0 tmp
+  tmp="$(mktemp)"
+  while IFS='|' read -r name wid spec; do
+    [ -n "$wid" ] || continue
+    if [ -n "$(resolve_space "$spec" 2>/dev/null || true)" ]; then
+      yabai -m window --deminimize "$wid" >/dev/null 2>&1 && n=$((n+1))
+    else
+      printf '%s|%s|%s\n' "$name" "$wid" "$spec" >> "$tmp"
+    fi
+  done < "$PARKED"
+  mv "$tmp" "$PARKED"
+  printf '%s' "$n"
+}
+cmd_unpark() {
+  local n left; n="$(unpark_windows)"
+  left="$(grep -c . "$PARKED" 2>/dev/null || echo 0)"
+  if [ "${n:-0}" -gt 0 ] 2>/dev/null; then
+    cmd_place category >/dev/null 2>&1 || true
+    echo "[perch] unparked $n window(s) and re-placed them"
+  fi
+  [ "${left:-0}" -gt 0 ] 2>/dev/null && echo "[perch] $left still parked — their monitor isn't connected yet"
+  [ "${n:-0}" -gt 0 ] || [ "${left:-0}" -gt 0 ] || echo "[perch] nothing parked"
+  return 0
+}
+
+# ===================== agents: herd coding agents (tmux-backed) =====================
+# Coding agents (claude, codex, cursor, …) run as WINDOWS in one persistent tmux
+# session ($AGENTS_SESSION). They survive closing Terminal — reattach any time —
+# and `perch agents` classifies each as working / blocked / idle so you never hunt
+# for the stuck one. `perch cockpit` attaches the whole herd as tabs in ONE terminal.
+tmux_ok() { command -v tmux >/dev/null 2>&1; }
+require_tmux() { tmux_ok && return 0; echo "perch: agents need tmux — install it with: brew install tmux" >&2; return 1; }
+agents_session_exists() { tmux has-session -t "=$AGENTS_SESSION" 2>/dev/null; }
+agent_win_exists() { tmux list-windows -t "$AGENTS_SESSION" -F '#W' 2>/dev/null | grep -qxF "$1"; }
+
+# default agent command when none is given: first installed of this shortlist
+agent_default_cmd() {
+  local c
+  for c in claude codex opencode cursor-agent aider gemini; do
+    command -v "$c" >/dev/null 2>&1 && { printf '%s' "$c"; return; }
+  done
+  printf 'claude'
+}
+
+# a themed status bar so the cockpit reads at a glance (nicer than bare tmux/herdr):
+# perch badge on the left, live ▶working ⏸idle ⚠blocked counts + clock on the right,
+# the current agent tab highlighted in perch blue.
+agents_write_tmux_conf() {
+  mkdir -p "$(dirname "$AGENTS_TMUX_CONF")"
+  cat > "$AGENTS_TMUX_CONF" <<'TMUXCONF'
+set  -g mouse on
+set  -g base-index 1
+setw -g pane-base-index 1
+set  -g renumber-windows on
+set  -g status-interval 3
+set  -g status-position top
+set  -g status-justify left
+set  -g status-style "bg=#101418,fg=#c7c7cc"
+set  -g status-left "#[bg=#0a84ff,fg=#ffffff,bold] 🪶 perch #[bg=#101418,fg=#0a84ff,nobold]  agents "
+set  -g status-left-length 40
+set  -g status-right "#[fg=#8e8e93]#(perch agents --count 2>/dev/null)   #[fg=#c7c7cc]%H:%M "
+set  -g status-right-length 60
+setw -g window-status-format " #I #W "
+setw -g window-status-current-format "#[bg=#0a84ff,fg=#ffffff,bold] #I #W "
+setw -g window-status-separator ""
+set  -g pane-border-style "fg=#2c2c2e"
+set  -g pane-active-border-style "fg=#0a84ff"
+set  -g default-terminal "screen-256color"
+TMUXCONF
+}
+
+agent_launch() {
+  local name="$1" dir="$2" cmd="$3"
+  dir="$(expand_path "$dir")"
+  [ -d "$dir" ] || { echo "perch: directory not found: $dir" >&2; return 1; }
+  [ -n "$cmd" ] || cmd="$(agent_default_cmd)"
+  agents_write_tmux_conf
+  if agents_session_exists; then
+    if agent_win_exists "$name"; then
+      tmux select-window -t "$AGENTS_SESSION:$name" 2>/dev/null || true
+      echo "[perch] agent '$name' is already perched — attach with: perch cockpit"
+      return 0
+    fi
+    tmux new-window -t "$AGENTS_SESSION" -n "$name" -c "$dir" 2>/dev/null || return 1
+  else
+    tmux -f "$AGENTS_TMUX_CONF" new-session -d -s "$AGENTS_SESSION" -n "$name" -c "$dir" 2>/dev/null || return 1
+  fi
+  # run the agent, then fall back to the shell so a finished agent's output stays for review
+  tmux send-keys -t "$AGENTS_SESSION:$name" "clear; $cmd" Enter
+  echo "[perch] agent '$name' perched  ($cmd · ${dir/#$HOME/~})"
+  echo "        herd view:  perch cockpit     status:  perch agents"
+}
+
+# working|blocked|idle — heuristic (ponytail: crude by design, good enough to find the stuck one):
+# recent pane output => working; else a pending question/permission prompt on screen => blocked; else idle.
+agent_status() {
+  local win="$1" now act delta last
+  now="$(date +%s)"
+  act="$(tmux display-message -p -t "$AGENTS_SESSION:$win" '#{window_activity}' 2>/dev/null)"
+  [ -n "$act" ] || { printf 'idle'; return; }
+  delta=$(( now - act ))
+  if [ "$delta" -lt "$AGENT_WORKING_SECS" ]; then printf 'working'; return; fi
+  last="$(tmux capture-pane -p -t "$AGENTS_SESSION:$win" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -n 20)"
+  if printf '%s' "$last" | grep -qiE '\(y/n\)|\[y/n\]|\[y/N\]|\[Y/n\]|\(yes/no\)|do you want|would you like|proceed\??|continue\??|approve|allow this|press enter|press return|permission|awaiting|waiting for|❯ 1\.|\?[[:space:]]*$'; then
+    printf 'blocked'
+  else
+    printf 'idle'
+  fi
+}
+
+agents_list_rows() {   # name<TAB>status<TAB>dir
+  agents_session_exists || return 0
+  local win
+  while IFS= read -r win; do
+    [ -n "$win" ] || continue
+    printf '%s\t%s\t%s\n' "$win" "$(agent_status "$win")" "$(tmux display-message -p -t "$AGENTS_SESSION:$win" '#{pane_current_path}' 2>/dev/null)"
+  done < <(tmux list-windows -t "$AGENTS_SESSION" -F '#W' 2>/dev/null)
+}
+
+agents_detect() {
+  echo "  coding agents installed on PATH:"
+  local found=0 c p
+  for c in $AGENT_CLIS; do
+    p="$(command -v "$c" 2>/dev/null || true)"
+    [ -n "$p" ] && { printf '    \033[32m●\033[0m %-14s %s\n' "$c" "$p"; found=$((found+1)); }
+  done
+  [ "$found" -eq 0 ] && echo "    (none of: $AGENT_CLIS)"
+  echo "  default when you omit the command: $(agent_default_cmd)"
+}
+
+cmd_cockpit() {
+  require_tmux || return 1
+  agents_session_exists || { echo "[perch] no agents running yet — start one: perch agent <name> <dir> [command]"; return 1; }
+  agents_write_tmux_conf
+  if [ -n "${TMUX:-}" ]; then
+    tmux switch-client -t "$AGENTS_SESSION" 2>/dev/null || tmux attach -t "$AGENTS_SESSION"
+    return 0
+  fi
+  # open ONE Terminal window (reused tab "perch-cockpit") attached to the whole herd
+  launch "perch-cockpit" "$HOME" "-" "tmux -f \"$AGENTS_TMUX_CONF\" attach -t \"$AGENTS_SESSION\""
+}
+
+cmd_agents() {
+  case "${1:-list}" in
+    ""|list|ls|status)
+      require_tmux || return 1
+      if ! agents_session_exists; then echo "[perch] no agents running. start one:  perch agent <name> <dir> [command]"; return 0; fi
+      local name st dir dot n=0 b=0
+      printf '  %-3s %-16s %-8s %s\n' "" AGENT STATUS DIR
+      while IFS=$'\t' read -r name st dir; do
+        [ -n "$name" ] || continue
+        case "$st" in
+          working) dot=$'\033[32m●\033[0m' ;;
+          blocked) dot=$'\033[31m●\033[0m'; b=$((b+1)) ;;
+          *)       dot=$'\033[90m●\033[0m' ;;
+        esac
+        printf '   %b  %-16s %-8s %s\n' "$dot" "$name" "$st" "${dir/#$HOME/~}"
+        n=$((n+1))
+      done < <(agents_list_rows)
+      if [ "$b" -gt 0 ]; then printf '  \342\224\200\342\224\200 %s agent(s), \033[31m%s blocked\033[0m — attach: perch cockpit\n' "$n" "$b"
+      else printf '  \342\224\200\342\224\200 %s agent(s) — attach: perch cockpit\n' "$n"; fi ;;
+    --plain|plain) require_tmux || return 1; agents_list_rows ;;
+    --count|count)
+      agents_session_exists || { printf ''; return 0; }
+      local w=0 i=0 b=0 st
+      while IFS=$'\t' read -r _ st _; do case "$st" in working) w=$((w+1)) ;; blocked) b=$((b+1)) ;; *) i=$((i+1)) ;; esac; done < <(agents_list_rows)
+      printf '\342\226\266%s \342\217\270%s \342\232\240%s' "$w" "$i" "$b" ;;
+    attach|cockpit|open) shift; cmd_cockpit "$@" ;;
+    detect|clis|list-clis) agents_detect ;;
+    stop|kill)
+      shift; require_tmux || return 1
+      if [ -n "${1:-}" ]; then
+        tmux kill-window -t "$AGENTS_SESSION:$1" 2>/dev/null && echo "[perch] stopped agent '$1'" || echo "[perch] no such agent '$1'"
+      else
+        tmux kill-session -t "$AGENTS_SESSION" 2>/dev/null && echo "[perch] stopped all agents" || echo "[perch] no agents running"
+      fi ;;
+    killall|stopall) shift; require_tmux || return 1; tmux kill-session -t "$AGENTS_SESSION" 2>/dev/null && echo "[perch] stopped all agents" || echo "[perch] no agents running" ;;
+    *) echo "perch agents: unknown '$1' — try: list | attach | detect | stop [name] | killall" >&2; return 1 ;;
+  esac
+}
+
+cmd_agent() {
+  require_tmux || return 1
+  local sub="${1:-}"
+  case "$sub" in
+    ""|help|-h|--help)
+      echo "usage: perch agent <name> [dir] [command]   launch/reuse a coding agent (default command: $(agent_default_cmd))"
+      echo "       perch agent stop <name>              stop one agent"
+      echo "       perch agent restart <name>           restart it in the same dir"
+      echo "       perch agents                         list all with status;  perch cockpit  attaches the herd"
+      return 0 ;;
+    stop) shift; tmux kill-window -t "$AGENTS_SESSION:${1:-}" 2>/dev/null && echo "[perch] stopped agent '${1:-}'" || echo "[perch] no such agent '${1:-}'"; return ;;
+    restart)
+      shift; local n="${1:-}"; [ -n "$n" ] || { echo "perch: restart which agent?" >&2; return 1; }
+      local d; d="$(tmux display-message -p -t "$AGENTS_SESSION:$n" '#{pane_current_path}' 2>/dev/null)"
+      tmux kill-window -t "$AGENTS_SESSION:$n" 2>/dev/null || true
+      agent_launch "$n" "${d:-$PWD}" ""; return ;;
+    list|ls|status) cmd_agents list; return ;;
+    attach|cockpit) shift; cmd_cockpit "$@"; return ;;
+    detect) agents_detect; return ;;
+  esac
+  # launch: perch agent <name> [dir] [command...]
+  local name="$1"; shift
+  local dir="$PWD"
+  if [ -n "${1:-}" ]; then
+    case "$1" in
+      /*|~*|./*|../*) dir="$1"; shift ;;
+      *) if [ -d "$(expand_path "$1")" ]; then dir="$1"; shift; fi ;;
+    esac
+  fi
+  agent_launch "$name" "$dir" "$*"
+}
+
+# ---------- bar: native menu bar (toolbar) app ----------
+bar_agent() { printf '%s' "$HOME/Library/LaunchAgents/dev.perch.menubar.plist"; }
+cmd_bar() {
+  local sub="${1:-open}" app="/Applications/PerchBar.app" real dir src tmp
+  real="$(perch_realpath)"; dir="$(cd -P "$(dirname "$real")" >/dev/null 2>&1 && pwd)"; src="$dir/perch-bar.swift"
+  case "$sub" in
+    build|rebuild)
+      [ -f "$src" ] || { echo "perch: menu bar source not found at $src" >&2; return 1; }
+      command -v swiftc >/dev/null 2>&1 || { echo "perch: swiftc (Xcode command line tools) is required to build the menu bar app" >&2; return 1; }
+      tmp="$(mktemp -d)"; mkdir -p "$tmp/PerchBar.app/Contents/MacOS"
+      swiftc -O -parse-as-library -o "$tmp/PerchBar.app/Contents/MacOS/PerchBar" "$src" || { rm -rf "$tmp"; return 1; }
+      mkdir -p "$tmp/PerchBar.app/Contents/Resources"
+      if [ -f "$dir/perch-icon.swift" ] && command -v iconutil >/dev/null 2>&1 && command -v sips >/dev/null 2>&1; then
+        ib="$(mktemp -d)"
+        if swiftc -O -o "$ib/icongen" "$dir/perch-icon.swift" 2>/dev/null && "$ib/icongen" "$ib/icon.png" 2>/dev/null && [ -f "$ib/icon.png" ]; then
+          mkdir -p "$ib/AppIcon.iconset"
+          for z in 16 32 128 256 512; do
+            sips -z "$z" "$z" "$ib/icon.png" --out "$ib/AppIcon.iconset/icon_${z}x${z}.png" >/dev/null 2>&1
+            sips -z "$((z*2))" "$((z*2))" "$ib/icon.png" --out "$ib/AppIcon.iconset/icon_${z}x${z}@2x.png" >/dev/null 2>&1
+          done
+          iconutil -c icns "$ib/AppIcon.iconset" -o "$tmp/PerchBar.app/Contents/Resources/AppIcon.icns" 2>/dev/null
+        fi
+        rm -rf "$ib"
+      fi
+      cat > "$tmp/PerchBar.app/Contents/Info.plist" <<'PL'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleName</key><string>PerchBar</string>
+  <key>CFBundleIdentifier</key><string>dev.perch.menubar</string>
+  <key>CFBundleExecutable</key><string>PerchBar</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>LSUIElement</key><true/>
+  <key>LSMinimumSystemVersion</key><string>13.0</string>
+</dict></plist>
+PL
+      pkill -x PerchBar 2>/dev/null || true; sleep 0.3
+      rm -rf "$app"; mv "$tmp/PerchBar.app" "$app"; rm -rf "$tmp"
+      codesign --force --sign - "$app" >/dev/null 2>&1 || true
+      echo "[perch] built $app"
+      open "$app"; echo "[perch] menu bar app running — look for the 🪶 in the menu bar"
+      ;;
+    open|"")
+      [ -d "$app" ] || cmd_bar build || return 1
+      pgrep -x PerchBar >/dev/null 2>&1 || open "$app"
+      echo "[perch] menu bar app running — look for the 🪶 in the menu bar"
+      ;;
+    on|login)
+      [ -d "$app" ] || cmd_bar build || return 1
+      mkdir -p "$(dirname "$(bar_agent)")"
+      cat > "$(bar_agent)" <<PL
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>dev.perch.menubar</string>
+  <key>ProgramArguments</key><array><string>/usr/bin/open</string><string>-g</string><string>$app</string></array>
+  <key>RunAtLoad</key><true/>
+</dict></plist>
+PL
+      launchctl unload "$(bar_agent)" >/dev/null 2>&1 || true
+      launchctl load "$(bar_agent)" >/dev/null 2>&1 || true
+      pgrep -x PerchBar >/dev/null 2>&1 || open "$app"
+      echo "[perch] menu bar app will start at login (LaunchAgent dev.perch.menubar)"
+      ;;
+    off)
+      launchctl unload "$(bar_agent)" >/dev/null 2>&1 || true
+      rm -f "$(bar_agent)"; pkill -x PerchBar 2>/dev/null || true
+      echo "[perch] menu bar app removed from login and stopped"
+      ;;
+    stop|quit) pkill -x PerchBar 2>/dev/null && echo "[perch] menu bar app stopped" || echo "[perch] menu bar app not running" ;;
+    *) echo "perch: unknown bar subcommand '$sub' (open|build|on|off|stop)" >&2; return 1 ;;
+  esac
+}
+
 autoplace_remove_signals() {
   local L
-  for L in perch_autoplace_new perch_autoplace_disp perch_autoplace_dchg; do
+  for L in perch_autoplace_new perch_autoplace_disp perch_autoplace_dchg perch_autoplace_drem; do
     yabai -m signal --remove "$L" 2>/dev/null || true
   done
 }
@@ -1465,6 +1988,7 @@ autoplace_rc() {
     echo "yabai -m signal --add label=perch_autoplace_new  event=window_created app=\"^Terminal\$\" action=\"'$self' autoplace _fire &\""
     echo "yabai -m signal --add label=perch_autoplace_disp event=display_added                    action=\"'$self' autoplace _fire &\""
     echo "yabai -m signal --add label=perch_autoplace_dchg event=display_changed                  action=\"'$self' autoplace _fire &\""
+    echo "yabai -m signal --add label=perch_autoplace_drem event=display_removed                  action=\"'$self' park _auto &\""
     echo "# <<< perch autoplace <<<"
   } >> "$rc"
 }
@@ -1480,6 +2004,7 @@ cmd_autoplace() {
       mkdir "$lock" 2>/dev/null || return 0
       trap 'rmdir /tmp/perch-autoplace.lock 2>/dev/null' EXIT INT TERM
       sleep 1.2
+      unpark_windows >/dev/null 2>&1 || true
       cmd_place category >/dev/null 2>&1 || true
       ;;
     now|run|once) cmd_place category ;;
@@ -1490,6 +2015,7 @@ cmd_autoplace() {
       yabai -m signal --add label=perch_autoplace_new  event=window_created app="^Terminal$" action="'$self' autoplace _fire &" 2>/dev/null
       yabai -m signal --add label=perch_autoplace_disp event=display_added                    action="'$self' autoplace _fire &" 2>/dev/null
       yabai -m signal --add label=perch_autoplace_dchg event=display_changed                  action="'$self' autoplace _fire &" 2>/dev/null
+      yabai -m signal --add label=perch_autoplace_drem event=display_removed                  action="'$self' park _auto &" 2>/dev/null
       autoplace_rc add
       echo "[perch] autoplace ON — every new terminal / display change re-groups terminals by type ('perch place')"
       ;;
@@ -1863,9 +2389,17 @@ main() {
     gui|dashboard|ui) shift; cmd_gui "$@" ;;
     setup) cmd_setup ;;
     doctor|check) cmd_doctor ;;
-    list|ls) cmd_list ;;
+    list|ls) shift; cmd_list "$@" ;;
     groups|clusters|cluster|by-product) cmd_groups ;;
     autoplace|auto) shift; cmd_autoplace "$@" ;;
+    park) shift; cmd_park "$@" ;;
+    reap|orphans) shift; cmd_reap "$@" ;;
+    apps|app|pin) shift; cmd_apps "$@" ;;
+    unpark) cmd_unpark ;;
+    bar|menubar|toolbar) shift; cmd_bar "$@" ;;
+    agent) shift; cmd_agent "$@" ;;
+    agents|herd) shift; cmd_agents "$@" ;;
+    cockpit) shift; cmd_cockpit "$@" ;;
     start|restart|run)
       shift
       if [ "$#" -ge 1 ]; then

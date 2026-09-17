@@ -10,6 +10,10 @@ perch fixes that. Every server gets a tab with a stable title. Run the same comm
 
 It has since grown a few larger conveniences: a favorites set you launch as a group, optional desktop placement and tiling across multiple monitors (via yabai), and a small web dashboard with a spatial arranger you can drag windows around in.
 
+## Origins
+
+perch started life as **`pz-dev`** — a throwaway shell helper for one project, [podzyme](https://podzyme.com) (the `pz`). It did one thing: start podzyme's dev servers in Terminal tabs that survived the coding-agent shell that launched them. It turned out every project I touched had the same problem, so `pz-dev` grew past podzyme, got the project-neutral name **perch** (each server perches in its own tab), and kept growing into favorites, multi-monitor placement, a web dashboard, and a menu bar app. The `pz-dev` command still works — it's symlinked to `perch` — so nothing that predates the rename breaks.
+
 ## Features
 
 - Launch a registered project by name alone: `perch {project-name}`.
@@ -20,11 +24,39 @@ It has since grown a few larger conveniences: a favorites set you launch as a gr
 - Servers outlive the shell that launched them. They run in real Terminal tabs, not child processes.
 - **Favorites**: pick a working set once, launch it all with `perch fav go`, stop it with `perch killall`.
 - **Desktop placement (optional)**: send each server to a specific desktop by category, tiled full width and stacked, across any monitor layout. Off cleanly if you don't want it.
+- **Pin other apps too**: `perch apps add "Google Chrome" 2:1` sends any app's windows to a chosen display/desktop, not just terminals.
+- **Park on monitor unplug**: when an external display disconnects, perch minimizes the windows macOS dumps onto the laptop and restores them on reconnect — the laptop screen stays yours. Toggle with `perch set park`, or exempt a single app with `perch apps park "<App>" off` (also a per-app switch in the menu bar) so that one stays in place.
+- **Herd your coding agents**: run Claude Code / Codex / Cursor / opencode / aider as persistent, resumable sessions; see which one is **working / blocked / idle** at a glance; attach the whole herd as tabs in one terminal. See below.
+- **Menu bar app (PerchBar)**: start/restart/place projects from a native menu bar popover, with live ↓/↑ network speed (NetSpeed-style), a running-server count, and an Agents section that flags any blocked agent (⚠) right in the menu bar. `perch bar on` to launch at login.
+- **Metro client logs**: Metro servers append the RN app's console output to `~/.config/perch/logs/<marker>.log`.
 - **Window position memory**: a closed-and-reopened server returns to its last size, position, and monitor.
 - **Web dashboard**: `perch gui` opens a local dashboard with live status, one-click start/stop, and a spatial arranger where you drag terminals between desktops and save.
 - **Portable**: `perch setup` auto-detects the machine's monitors and writes a sensible layout; `perch doctor` tells you exactly what (if anything) to install.
 
 The "outlive the shell" point is the reason this exists as more than an alias. I use coding agents heavily, and a server started from an agent's shell dies when the session ends. A server started through perch does not.
+
+## Agents (herd your coding agents)
+
+The same idea perch applies to dev servers — start it once, let it outlive the shell, find it again by name — applied to coding agents. Agents run as windows in one persistent `tmux` session, so they survive closing Terminal and you reattach whenever you want.
+
+```bash
+perch agent api ~/code/backend            # launch an agent (default command = first installed: claude, codex, …)
+perch agent web ~/code/frontend "codex"   # …or name the command explicitly
+perch agents                              # list them with live status
+perch cockpit                             # attach the whole herd as tabs in ONE terminal
+```
+
+`perch agents` classifies each agent so you never hunt for the stuck one:
+
+- **● working** — the agent is producing output right now.
+- **● blocked** — a question or permission prompt is waiting on *you*.
+- **● idle** — ready, nothing in flight.
+
+`perch cockpit` opens a single terminal attached to every agent, each on its own tab, with a themed status bar showing the perch badge and live `▶ working ⏸ idle ⚠ blocked` counts. The menu bar app mirrors all of this in an **Agents** section, and shows a **⚠N** in the menu bar itself the moment any agent blocks.
+
+Other commands: `perch agent stop|restart <name>`, `perch agents stop [name] | killall`, `perch agents detect` (which agent CLIs are installed).
+
+Status is a heuristic (recent output ⇒ working; a pending prompt on screen ⇒ blocked), tuned to be useful rather than perfect. Requires `tmux` (`brew install tmux`).
 
 ## Install
 
@@ -172,6 +204,7 @@ PORT=$(perch port 2>/dev/null || echo 3000) nest start --watch
 - **macOS** with Terminal.app. AppleScript is load-bearing; there is no Linux or Windows port.
 - **python3** (ships with the Xcode command line tools) for the web dashboard and `perch setup`.
 - **yabai** for desktop placement only. Install with `brew install koekeishiya/formulae/yabai`, run `yabai --start-service`, and grant it Accessibility. Everything except placement works without it.
+- **tmux** for the agents commands only (`brew install tmux`). Nothing else needs it.
 
 Run `perch doctor` and it prints exactly which of these is missing plus the command to fix it.
 

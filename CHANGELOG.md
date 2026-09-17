@@ -1,5 +1,34 @@
 # Changelog
 
+## 2.7.0
+
+### Added — herd your coding agents (tmux-backed)
+- **`perch agent <name> [dir] [command]`**: launch a coding agent (Claude Code, Codex, Cursor, opencode, aider, …) as a window in one persistent tmux session. It survives closing Terminal — reattach any time. Omit the command and perch runs the first agent CLI it finds installed. Reusing a name focuses the existing agent instead of double-starting it.
+- **`perch agents`**: list every agent with a live status — **● working** (recent output), **● blocked** (a question/permission prompt is waiting on you), or **● idle** — so you never hunt for the stuck one. `--plain` for scripts, `--count` for the `▶ ⏸ ⚠` tallies.
+- **`perch cockpit`**: attach the whole herd as tabs in ONE terminal, with a themed status bar (perch badge, live working/idle/blocked counts, the current agent tab highlighted). Mouse-clickable tabs; switch with the tmux keys.
+- **`perch agent stop|restart <name>`**, **`perch agents stop [name] | killall`**, **`perch agents detect`** (list the agent CLIs installed on this machine).
+- **Menu bar (PerchBar)**: a new **Agents** section shows each agent with its status dot, a **blocked** badge, per-agent restart/stop, and an **Open cockpit** row. When any agent is blocked, the menu bar itself shows a **⚠N** so you notice from anywhere.
+- Requires `tmux` (`brew install tmux`).
+
+### Changed
+- The park toggle in the menu bar now reads **"Park windows when a monitor unplugs"** (it always covered pinned apps too, not just terminals), with a clearer subtext and a **"See how windows are organized"** link that opens the dashboard. Matching wording fixed in `perch park`/`unpark` help.
+
+### Added — per-window park exemption (apps AND terminals)
+- **`perch apps park "<name>" on|off`**: exempt a single window from parking — works for a pinned app *or* a perch terminal (by its marker). With it **off**, that window stays put when a monitor disconnects instead of being minimized with everything else. State persists in `~/.config/perch/park-exclude` and is respected by both manual and automatic park; it shows in `perch apps list` and in `perch list --plain` (a 5th `on/off` column).
+- **Menu bar (PerchBar)**: a redesigned **"Keep in place"** area under the park toggle — pinned apps render as cards with their real app icons, and a **Terminals** disclosure expands to let you de-pin any open terminal. Flip one off and the card turns amber with a 📌, reading "stays in place on disconnect."
+
+## 2.6.0
+
+### Added
+- **Park on monitor disconnect**: `perch park` minimizes every terminal that is mapped to an external display but got dumped onto the main (laptop) display when that monitor disconnected, so the laptop screen stays clean. `perch unpark` restores them and re-places them. Autoplace now wires a `display_removed` yabai signal to `park`, and its `display_added` handler unparks before placing — so disconnect/reconnect is fully automatic. Uses the window's real display (not display indices), so it stays correct when yabai renumbers displays after a middle monitor drops.
+- **Menu bar (toolbar) app**: `perch bar` builds and launches PerchBar, a native zero-dependency NSStatusItem app (🪶 with a running-server count). Compact top level: **Running servers ▸** (each server has Restart / Open in browser / Stop), **Start a project ▸** (all projects grouped by type), a **Park terminals when a monitor unplugs** checkmark toggle, **Open web dashboard**, plus Place all / Launch favorites / Stop all. `perch bar on/off` adds/removes it from login; `perch bar build` rebuilds from `perch-bar.swift`.
+- **`perch set park on|off`**: turn the automatic park-on-monitor-unplug behavior off/on (default on). Manual `perch park` always works; only the signal-driven park respects it. `perch set <key>` with no value prints the current value.
+- **Pin other apps to a display, not just terminals**: `perch apps add "Google Chrome" 2:1` maps any app to a `display:space`; `perch place` then sends that app's windows there too, and park/unpark cover them on monitor disconnect/reconnect. `perch apps list|remove` to manage the map (`~/.config/perch/apps.conf`).
+- **Menu bar net speed (NetSpeed-style)**: the menu bar item now shows live ↓/↑ throughput next to the 🪶 and running-server count, sampled from the active interfaces every 1.5s.
+- **App icon**: PerchBar now ships a generated icon (bird on a teal squircle) built from `perch-icon.swift` at `perch bar build` time.
+- **Faster menu**: `perch list --plain` went from ~2.3s to ~0.02s (one `netstat` for all ports instead of one `lsof` per project; fork-free `categorize`), and the menu bar app caches state + refreshes in the background so the panel opens instantly.
+- **`perch list --plain`**: tab-separated `name port status category` for scripts and the menu bar app.
+
 ## 2.5.4
 
 ### Added
