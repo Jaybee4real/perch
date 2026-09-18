@@ -17,7 +17,7 @@ perch started life as **`pz-dev`** — a throwaway shell helper for one project,
 ## Features
 
 - Launch a registered project by name alone: `perch {project-name}`.
-- **Product clusters**: `perch groups` auto-groups projects by name prefix, and `perch jakstoc` starts the whole cluster (backend first).
+- **Product clusters**: `perch groups` auto-groups projects by name prefix, and `perch example` starts the whole cluster (backend first).
 - **Port as single source of truth**: `perch port` lets a project's own start script bind its assigned port, with a framework-default fallback when perch isn't installed.
 - One reusable tab per server, matched by tab title. No window pileup.
 - Frees the port before starting, so restarts never die with `EADDRINUSE`.
@@ -96,7 +96,7 @@ perch {marker} {dir} {port} "{command}"
 
 ```
 perch <project>                 launch a registered project (restart in place if already open)
-perch <prefix>                  start a whole product cluster, backend-first (e.g. perch jakstoc)
+perch <prefix>                  start a whole product cluster, backend-first (e.g. perch example)
 perch <marker> <dir> <port> <cmd>   ad-hoc launch of anything
 
 perch fav                       interactive picker: choose a working set, save + launch

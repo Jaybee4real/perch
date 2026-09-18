@@ -124,8 +124,8 @@ lookup() {
 
 project_names() { config_lines | cut -d'|' -f1; }
 
-# Match a token against project directory basenames, so `perch jakstoc-mobile`
-# finds the repo registered as `jakstoc-metro` that lives in .../jakstoc-mobile.
+# Match a token against project directory basenames, so `perch example-mobile`
+# finds the repo registered as `example-metro` that lives in .../example-mobile.
 # Prints the registered name; fails if there's no match or more than one.
 resolve_by_dirbase() {
   local wanted="$1" name port dir cmd base match=""
@@ -1370,7 +1370,7 @@ cmd_port() {
 
 cat_rank() { case "$1" in backend) echo 0;; landing) echo 1;; web) echo 2;; admin) echo 3;; metro) echo 4;; *) echo 5;; esac; }
 
-# Auto-group projects by product = the name up to the first "-" (jakstoc-web -> jakstoc).
+# Auto-group projects by product = the name up to the first "-" (example-web -> example).
 cmd_groups() {
   config_lines | grep -q . || { echo "perch: no projects registered yet ($CONFIG)"; return 0; }
   local tmp; tmp="$(mktemp)"
@@ -1391,8 +1391,8 @@ cmd_groups() {
   rm -f "$tmp"
 }
 
-# Launch every project whose name starts with <prefix> (backend first). `perch jakstoc`
-# or `perch 'jakstoc*'` -> starts jakstoc-api, jakstoc-landing-page, jakstoc-web, jakstoc-admin.
+# Launch every project whose name starts with <prefix> (backend first). `perch example`
+# or `perch 'example*'` -> starts example-api, example-landing-page, example-web, example-admin.
 cmd_start_group() {
   local pref="${1%\*}"
   [ -n "$pref" ] || return 1
@@ -2076,7 +2076,7 @@ USAGE
   perch fav set <name> [name...]
 
 Example
-  perch fav set rentwize-metro podzyme-metro rentwize-backend
+  perch fav set example-metro example-api shop-web
 
 Overwrites the previous list. Use `perch fav add` to append instead.
 EOF
@@ -2088,7 +2088,7 @@ USAGE
   perch fav add <name> [name...]
 
 Example
-  perch fav add jakstoc-admin jakstoc-web
+  perch fav add example-admin example-web
 
 Each name must be a registered project (see `perch list`). Use `perch fav set` to replace,
 `perch fav clear` to empty.
@@ -2152,8 +2152,8 @@ title, else the working directory. Handy after Ctrl+C to relaunch in place.
 
 All forms free the project's port first, then run its command in the project's
 named tab (reused if it exists, created otherwise). A <project> can also be a
-product cluster prefix (perch start jakstoc = every jakstoc-*) or a repo's folder
-name (perch start jakstoc-mobile finds the project registered in that folder).
+product cluster prefix (perch start example = every example-*) or a repo's folder
+name (perch start example-mobile finds the project registered in that folder).
 EOF
     ;;
     open) cat <<'EOF'
@@ -2208,7 +2208,7 @@ USAGE
   perch add <name> <port> <dir> <command...>
 
 Example
-  perch add jakstoc-admin 3212 ~/Documents/.../jakstoc-admin "npx next dev -p 3212"
+  perch add example-admin 3212 ~/Documents/.../example-admin "npx next dev -p 3212"
 
 <port> is freed before launch (use "-" to skip the kill). Saved to ~/.config/perch/projects.conf.
 Undo with `perch remove <name>`.
@@ -2247,12 +2247,12 @@ perch groups — list projects grouped by product cluster (auto-grouped by name 
 USAGE
   perch groups              (aliases: perch clusters, perch cluster)
 
-Projects are grouped by the part of the name before the first "-" (jakstoc-web -> jakstoc).
+Projects are grouped by the part of the name before the first "-" (example-web -> example).
 Each multi-project cluster shows how to start it all at once.
 
 RELATED — start a whole cluster:
-  perch jakstoc             start every jakstoc-* project (backend first)
-  perch 'jakstoc*'          same (quote the * so the shell doesn't expand it)
+  perch example             start every example-* project (backend first)
+  perch 'example*'          same (quote the * so the shell doesn't expand it)
 EOF
     ;;
     stop) cat <<'EOF'
@@ -2263,7 +2263,7 @@ USAGE
   perch stop all            alias for `perch killall`
 
 Examples
-  perch stop rentwize-web-app
+  perch stop example-web
   perch stop 3001
 EOF
     ;;
