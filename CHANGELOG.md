@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.8.0
+
+### Added — perch Android emulators
+- **`perch emu <avd>`**: start an AVD in its own perch tab (`emu-<avd>`), always with a pinned DNS server (`-dns-server 8.8.8.8,1.1.1.1`, override with `PERCH_EMU_DNS`). The emulator otherwise freezes the Mac's DNS servers at boot; after a VPN or Wi-Fi change every name lookup inside it fails and every app shows "Network Error". Pinning DNS makes that impossible.
+- **`perch emu list`**: every AVD with running/stopped, its serial, whether it's **perched** or an **ORPHAN** (running outside a perch tab), and which DNS it uses.
+- **`perch emu adopt [avd]`**: gracefully stop an orphan emulator (Quick Boot state kept) and relaunch it in its perch tab with pinned DNS. `perch reap` now does this for emulators too — it adopts them instead of killing them.
+- **`perch emu stop <avd>`**: graceful stop that keeps Quick Boot state.
+
 ## 2.7.0
 
 ### Added — herd your coding agents (tmux-backed)

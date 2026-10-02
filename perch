@@ -7,7 +7,7 @@
 # Run `perch help` for usage.
 set -euo pipefail
 
-PERCH_VERSION="2.7.0"
+PERCH_VERSION="2.8.0"
 CONFIG="${PERCH_CONFIG:-$HOME/.config/perch/projects.conf}"
 FAVORITES="${PERCH_FAVORITES:-$HOME/.config/perch/favorites}"
 CATEGORIES="${PERCH_CATEGORIES:-$HOME/.config/perch/categories.conf}"
@@ -57,6 +57,12 @@ USAGE
   perch bar [open|build|on|off|stop]     menu bar (toolbar) app: start/restart/place projects + live net speed from the menu bar
   perch apps [list|add|remove|capture]   also pin OTHER apps (Chrome, Slack…) to a display:space; place + park cover them
   perch apps park "<App>" on|off         exempt one app from parking — off = it stays in place when a monitor disconnects
+
+  EMULATORS (Android AVDs, each in its own perch tab with pinned DNS)
+  perch emu [list]                       AVDs: running/stopped, perched or ORPHAN, DNS in use
+  perch emu <avd>                        start in tab emu-<avd> (adopts it if it's running orphaned)
+  perch emu adopt [avd]                  move orphan emulators into perch tabs (perch reap does this too)
+  perch emu stop <avd>                   graceful stop, keeps Quick Boot state
 
   AGENTS (herd coding agents — tmux-backed, survive closing Terminal)
   perch agent <name> [dir] [command]     launch/reuse a coding agent (default command = first installed: claude, codex, …)
@@ -1626,6 +1632,7 @@ cmd_reap() {
       if [ "$dry" = "0" ]; then lsof -ti tcp:"$port" -sTCP:LISTEN 2>/dev/null | xargs kill -9 2>/dev/null; echo "    -> reaped"; fi
     fi
   done < <(config_lines)
+  [ -x "$EMU_BIN" ] && emu_adopt "" "$dry"
   if [ "$found" = "0" ]; then echo "[perch] no orphans - every registered server is attached to its terminal"
   elif [ "$dry" = "1" ]; then echo "[perch] $found orphan(s) - run 'perch reap' to kill them"
   else echo "[perch] reaped $found orphan(s); restart any you still want with 'perch <name>'"; fi
@@ -1701,6 +1708,109 @@ cmd_unpark() {
   [ "${left:-0}" -gt 0 ] 2>/dev/null && echo "[perch] $left still parked — their monitor isn't connected yet"
   [ "${n:-0}" -gt 0 ] || [ "${left:-0}" -gt 0 ] || echo "[perch] nothing parked"
   return 0
+}
+
+# ===================== emulators: perch Android emulators =====================
+# Each AVD runs in its own perch tab (emu-<avd>) with a pinned DNS server, so it never
+# inherits a stale host DNS snapshot (the emulator freezes the Mac's resolvers at boot;
+# after a VPN/Wi-Fi change every lookup in every app fails -> "Network Error").
+EMU_BIN="${PERCH_EMULATOR:-$HOME/Library/Android/sdk/emulator/emulator}"
+EMU_DNS="${PERCH_EMU_DNS:-8.8.8.8,1.1.1.1}"
+adb_bin() { command -v adb 2>/dev/null || printf '%s' "$HOME/Library/Android/sdk/platform-tools/adb"; }
+emu_avds() { "$EMU_BIN" -list-avds 2>/dev/null | grep -v '^INFO'; }
+emu_pid() { pgrep -f "qemu-system[^ ]* .*-avd $1( |$)" 2>/dev/null | head -1; }
+emu_serial() {
+  local s a; for s in $("$(adb_bin)" devices 2>/dev/null | awk '/^emulator-/{print $1}'); do
+    a="$("$(adb_bin)" -s "$s" emu avd name 2>/dev/null | head -1 | tr -d '\r')"; [ "$a" = "$1" ] && { printf '%s' "$s"; return; }
+  done
+}
+emu_tab_titles() {
+  /usr/bin/osascript 2>/dev/null <<'OSA'
+set out to ""
+tell application "Terminal"
+  repeat with w in windows
+    try
+      repeat with t in tabs of w
+        try
+          set out to out & (tty of t) & "|" & (custom title of t) & linefeed
+        end try
+      end repeat
+    end try
+  end repeat
+end tell
+return out
+OSA
+}
+# title of the Terminal tab a process runs under ("" = no tab / detached)
+emu_tab_of_pid() {
+  local walk="$1" guard=0 tv map="$2" hit
+  while [ -n "$walk" ] && [ "$walk" != "1" ] && [ "$walk" != "0" ] && [ "$guard" -lt 12 ]; do
+    tv="$(ps -o tty= -p "$walk" 2>/dev/null | tr -d ' ')"
+    if [ -n "$tv" ] && [ "$tv" != "??" ]; then
+      hit="$(printf '%s\n' "$map" | grep -F "/dev/$tv|" | head -1)"; [ -n "$hit" ] && { printf '%s' "${hit#*|}"; return; }
+    fi
+    walk="$(ps -o ppid= -p "$walk" 2>/dev/null | tr -d ' ')"; guard=$((guard+1))
+  done
+}
+emu_launch() { launch "emu-$1" "$HOME" "-" "$EMU_BIN -avd $1 -no-audio -dns-server $EMU_DNS"; }
+emu_stop() {
+  local avd="$1" s p i; s="$(emu_serial "$avd")"; p="$(emu_pid "$avd")"
+  [ -n "$p" ] || { echo "[perch] $avd is not running"; return 0; }
+  if [ -n "$s" ]; then "$(adb_bin)" -s "$s" emu kill >/dev/null 2>&1; else kill "$p" 2>/dev/null; fi
+  for i in $(seq 1 45); do kill -0 "$p" 2>/dev/null || break; sleep 1; done
+  kill -0 "$p" 2>/dev/null && { echo "[perch] $avd did not stop cleanly" >&2; return 1; }
+  echo "[perch] stopped $avd (Quick Boot state saved)"
+}
+emu_is_perched() { [ "$(emu_tab_of_pid "$(emu_pid "$1")" "$2")" = "emu-$1" ]; }
+# adopt orphaned (running, but not in their emu-<avd> perch tab) emulators; dry=1 only reports
+emu_adopt() {
+  local only="${1:-}" dry="${2:-0}" map avd n=0 p
+  map="$(emu_tab_titles)"
+  while IFS= read -r avd; do
+    [ -n "$avd" ] || continue; [ -n "$only" ] && [ "$only" != "$avd" ] && continue
+    p="$(emu_pid "$avd")"; [ -n "$p" ] || continue
+    emu_is_perched "$avd" "$map" && continue
+    n=$((n+1))
+    echo "  orphan emulator: $avd (pid $p) — not in a perch tab$(ps -o command= -p "$p" | grep -q -- '-dns-server' || printf ', no pinned DNS')"
+    [ "$dry" = "1" ] && continue
+    emu_stop "$avd" && emu_launch "$avd" >/dev/null && echo "    -> adopted into perch tab emu-$avd (dns $EMU_DNS)"
+  done < <(emu_avds)
+  [ "$n" = "0" ] && [ -z "$only" ] && echo "[perch] no orphan emulators"
+  return 0
+}
+emu_list() {
+  local map avd p s st dns; map="$(emu_tab_titles)"
+  printf '  %-24s %-24s %-9s %s\n' AVD STATE PERCH DNS
+  while IFS= read -r avd; do
+    [ -n "$avd" ] || continue; p="$(emu_pid "$avd")"
+    if [ -z "$p" ]; then printf '  %-24s %-24s %-9s %s\n' "$avd" stopped - -; continue; fi
+    s="$(emu_serial "$avd")"; st="running ${s:-?}"
+    dns="$(ps -o command= -p "$p" | grep -oE -- '-dns-server [^ ]+' | cut -d' ' -f2)"
+    if emu_is_perched "$avd" "$map"; then printf '  %-24s %-24s %-9s %s\n' "$avd" "$st" perched "${dns:-host (stale-prone)}"
+    else printf '  %-24s %-24s \033[33m%-9s\033[0m %s\n' "$avd" "$st" ORPHAN "${dns:-host (stale-prone)}"; fi
+  done < <(emu_avds)
+}
+cmd_emu() {
+  set +e +o pipefail
+  [ -x "$EMU_BIN" ] || { echo "perch: Android emulator not found at $EMU_BIN (set PERCH_EMULATOR)" >&2; return 1; }
+  local sub="${1:-list}"
+  case "$sub" in
+    list|ls|status) emu_list ;;
+    adopt) shift; emu_adopt "${1:-}" 0 ;;
+    stop) shift; emu_stop "${1:?usage: perch emu stop <avd>}" ;;
+    help|-h|--help)
+      echo "usage: perch emu [list]          AVDs with state, perch tab (or ORPHAN) and DNS"
+      echo "       perch emu <avd>           start it in perch tab emu-<avd> (adopts it if running orphaned)"
+      echo "       perch emu adopt [avd]     move running orphan emulators into their perch tab"
+      echo "       perch emu stop <avd>      graceful stop (keeps Quick Boot state)"
+      echo "  every perched emulator gets -dns-server $EMU_DNS (override with PERCH_EMU_DNS)" ;;
+    *)
+      emu_avds | grep -qxF "$sub" || { echo "perch: no AVD named '$sub'. AVDs: $(emu_avds | tr '\n' ' ')" >&2; return 1; }
+      if [ -n "$(emu_pid "$sub")" ]; then
+        if emu_is_perched "$sub" "$(emu_tab_titles)"; then echo "[perch] $sub already running in its perch tab"
+        else emu_adopt "$sub" 0; fi
+      else emu_launch "$sub"; fi ;;
+  esac
 }
 
 # ===================== agents: herd coding agents (tmux-backed) =====================
@@ -2397,6 +2507,7 @@ main() {
     apps|app|pin) shift; cmd_apps "$@" ;;
     unpark) cmd_unpark ;;
     bar|menubar|toolbar) shift; cmd_bar "$@" ;;
+    emu|emulator|emulators|avd) shift; cmd_emu "$@" ;;
     agent) shift; cmd_agent "$@" ;;
     agents|herd) shift; cmd_agents "$@" ;;
     cockpit) shift; cmd_cockpit "$@" ;;

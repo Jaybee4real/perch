@@ -27,6 +27,7 @@ perch started life as **`pz-dev`** — a throwaway shell helper for one project,
 - **Pin other apps too**: `perch apps add "Google Chrome" 2:1` sends any app's windows to a chosen display/desktop, not just terminals.
 - **Park on monitor unplug**: when an external display disconnects, perch minimizes the windows macOS dumps onto the laptop and restores them on reconnect — the laptop screen stays yours. Toggle with `perch set park`, or exempt a single app with `perch apps park "<App>" off` (also a per-app switch in the menu bar) so that one stays in place.
 - **Herd your coding agents**: run Claude Code / Codex / Cursor / opencode / aider as persistent, resumable sessions; see which one is **working / blocked / idle** at a glance; attach the whole herd as tabs in one terminal. See below.
+- **Android emulators, perched**: `perch emu <avd>` runs each AVD in its own tab with pinned DNS, so a VPN/Wi-Fi change can't leave it unable to resolve any host; `perch emu adopt` (and `perch reap`) pull emulators started elsewhere into their perch tab.
 - **Menu bar app (PerchBar)**: start/restart/place projects from a native menu bar popover, with live ↓/↑ network speed (NetSpeed-style), a running-server count, and an Agents section that flags any blocked agent (⚠) right in the menu bar. `perch bar on` to launch at login.
 - **Metro client logs**: Metro servers append the RN app's console output to `~/.config/perch/logs/<marker>.log`.
 - **Window position memory**: a closed-and-reopened server returns to its last size, position, and monitor.
