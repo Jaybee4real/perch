@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+# perch cd idle — for every Terminal tab sitting at an idle prompt whose title is a
+# registered perch marker, cd it to that project's folder. Busy tabs (running a
+# server) are never touched, and a tab already in the right folder is left alone.
+import json, os, re, subprocess, sys
+
+CONF = os.path.expanduser(os.environ.get("PERCH_PROJECTS", "~/.config/perch/projects.conf"))
+DRY = "--dry" in sys.argv or "dry" in sys.argv
+
+
+def registry():
+    out = {}
+    try:
+        with open(CONF) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split("|")
+                if len(parts) < 3:
+                    continue
+                name, directory = parts[0].strip(), parts[2].strip()
+                directory = os.path.realpath(os.path.expanduser(directory))
+                if os.path.isdir(directory):
+                    out[name] = directory
+    except OSError:
+        pass
+    return out
+
+
+def tabs():
+    script = (
+        'tell application "Terminal"\n'
+        'set out to ""\n'
+        'repeat with windex from 1 to count of windows\n'
+        'set theWindow to window windex\n'
+        'try\n'
+        'repeat with tindex from 1 to count of tabs of theWindow\n'
+        'set theTab to tab tindex of theWindow\n'
+        'set theTitle to ""\n'
+        'try\n set theTitle to custom title of theTab\n end try\n'
+        'set out to out & (id of theWindow as string) & "\\t" & (tindex as string) '
+        '& "\\t" & theTitle & "\\t" & (tty of theTab) & "\\t" & (busy of theTab as string) & linefeed\n'
+        'end repeat\n'
+        'end try\n'
+        'end repeat\n'
+        'return out\n'
+        'end tell'
+    )
+    try:
+        raw = subprocess.check_output(["osascript", "-e", script], text=True)
+    except subprocess.SubprocessError:
+        return []
+    rows = []
+    for line in raw.splitlines():
+        cells = line.split("\t")
+        if len(cells) >= 5:
+            rows.append(cells[:5])
+    return rows
+
+
+def shell_cwd(tty_path):
+    device = tty_path.rsplit("/", 1)[-1]
+    try:
+        listing = subprocess.check_output(["ps", "-t", device, "-o", "pid=,comm="], text=True)
+    except subprocess.SubprocessError:
+        return None
+    for line in listing.splitlines():
+        bits = line.split(None, 1)
+        if len(bits) != 2:
+            continue
+        pid, command = bits
+        if not os.path.basename(command.strip()).lstrip("-") in ("zsh", "bash", "sh", "fish"):
+            continue
+        try:
+            found = subprocess.check_output(["lsof", "-a", "-p", pid, "-d", "cwd", "-Fn"], text=True)
+        except subprocess.SubprocessError:
+            continue
+        for entry in found.splitlines():
+            if entry.startswith("n"):
+                return os.path.realpath(entry[1:])
+    return None
+
+
+def main():
+    projects = registry()
+    if not projects:
+        return
+    moved = 0
+    for window_id, tab_index, title, tty_path, busy in tabs():
+        if busy.strip().lower() == "true":
+            continue
+        marker = re.sub(r"\s*-\s*port:\d+\s*$", "", title.strip())
+        target = projects.get(marker)
+        if not target:
+            continue
+        current = shell_cwd(tty_path)
+        if current is None or current == target:
+            continue
+        moved += 1
+        print(f"  {marker}: {current} -> {target}")
+        if DRY:
+            continue
+        escaped = target.replace("\\", "\\\\").replace('"', '\\"')
+        subprocess.run(
+            ["osascript", "-e",
+             f'tell application "Terminal" to do script "cd \\"{escaped}\\"" '
+             f'in tab {tab_index} of (first window whose id is {window_id})'],
+            capture_output=True,
+        )
+    if moved:
+        print(f"perch cd idle: {'would move' if DRY else 'moved'} {moved} idle tab(s)")
+
+
+main()

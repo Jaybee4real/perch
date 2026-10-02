@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+# perch place empty — spread ALL open Terminal windows across every desktop that is
+# free for terminals (empty, or already terminals-only, and not a native-fullscreen
+# space). Terminals sitting on a working desktop (shared with other apps) get moved
+# off. Each target desktop is tiled full-width, equal-height, stacked, non-overlapping.
+import subprocess, json, math, collections
+def y(*a): subprocess.run(["yabai", "-m", *a], capture_output=True)
+def q(*a): return json.loads(subprocess.check_output(["yabai", "-m", "query", *a]))
+
+spaces = q("--spaces"); wins = q("--windows")
+disp = {d["index"]: d for d in q("--displays")}
+byspace = collections.defaultdict(list)
+for w in wins:
+    byspace[w["space"]].append(w)
+
+# Prefer the PORTRAIT display(s) — the dedicated terminal monitor (stacked terminals
+# fit a tall screen; a landscape display makes them ugly-wide). Fall back to all displays
+# only if there's no portrait one. Targets = non-fullscreen desktops with no other apps.
+portrait = {d["index"] for d in q("--displays") if d["frame"]["h"] > d["frame"]["w"]}
+targets = []
+for s in sorted(spaces, key=lambda x: (x["display"], x["index"])):
+    if s.get("is-native-fullscreen"):
+        continue
+    if portrait and s["display"] not in portrait:
+        continue
+    if any(w.get("app") != "Terminal" for w in byspace.get(s["index"], [])):
+        continue
+    targets.append(s["index"])
+
+terms = [w for w in wins if w.get("app") == "Terminal" and (w.get("title") or "").strip()]
+if not targets or not terms:
+    print("perch place empty: nothing to do (targets=%d terminals=%d)" % (len(targets), len(terms)))
+    raise SystemExit(0)
+
+terms.sort(key=lambda w: (w["space"], w["id"]))
+k = len(targets)
+# balanced: use EVERY free desktop (incl. the empty ones), sizes differ by at most 1
+base, extra = divmod(len(terms), k)
+sizes = [base + (1 if j < extra else 0) for j in range(k)]
+assign = collections.defaultdict(list)
+idx = 0
+for j, sp in enumerate(targets):
+    for _ in range(sizes[j]):
+        assign[sp].append(terms[idx]); idx += 1
+
+# move
+for sp, ws in assign.items():
+    for w in ws:
+        if w["space"] != sp:
+            y("window", str(w["id"]), "--space", str(sp))
+
+# tile each target desktop
+TOP, GAP = 32, 8
+sdisp = {s["index"]: s["display"] for s in spaces}
+for sp, ws in assign.items():
+    f = disp[sdisp[sp]]["frame"]
+    FX, FY, FW, FH = f["x"], f["y"], f["w"], f["h"]
+    n = len(ws); ah = (FH - TOP - GAP) / n
+    for i, w in enumerate(sorted(ws, key=lambda x: x["id"])):
+        y("window", str(w["id"]), "--move", f"abs:{int(FX+GAP)}:{int(FY+TOP+i*ah)}")
+        y("window", str(w["id"]), "--resize", f"abs:{int(FW-2*GAP)}:{int(ah-GAP)}")
+    print(f"  desktop space {sp} (display {sdisp[sp]}): {n} terminals")
+print(f"perch place empty: spread {len(terms)} terminals across {k} desktop(s)")

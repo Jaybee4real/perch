@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.9.0
+
+### Fixed — autoplace ignored titles, and `*-api` servers were never placed
+- **`perch autoplace` now groups by category instead of spreading.** It ran `perch place empty` (a balanced spread that ignores titles) while `perch autoplace status` claimed it grouped terminals by type. It now runs `perch place`.
+- **A tab titled `<marker> - port:N` is treated as a server**, registered or not, so unregistered dev servers land on their category's desktop instead of being skipped.
+- **`marker_of()` strips the ` - port:N` suffix before matching.** The server test anchors `-api$` to end-of-string, so `"jakstoc-api - port:8003"` never matched and every `*-api` server was silently skipped — `*backend*` only worked because it matches anywhere in the string.
+
+### Added — `perch-cd-idle`
+- Each autoplace pass cd's any Terminal tab **sitting at an idle prompt** to its registered project folder. Busy tabs are never touched, so a running server is never typed into, and a tab already in the right folder is left alone — repeat passes are silent.
+
+### Added — backend logs
+- **Backends now tee to `~/.config/perch/logs/<marker>.log`**, like Metro already did. A backend that dies leaves its tab at a prompt with the crash reason scrolled away; now there is a record. Logs over 20 MB are trimmed to their last 2000 lines at launch.
+
+### Packaging
+- `install.sh` symlinks `perch-place-category`, `perch-place-empty`, `perch-autoplace` and `perch-cd-idle` alongside `perch`. They were never tracked, so a fresh install got a `perch place` that silently did nothing.
+
 ## 2.8.0
 
 ### Added — perch Android emulators

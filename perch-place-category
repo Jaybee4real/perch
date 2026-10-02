@@ -1,0 +1,206 @@
+#!/usr/bin/env python3
+# perch place category — group ALL open Terminal server windows by project TYPE
+# (metro/landing/web/admin/backend) onto their mapped portrait desktops per
+# ~/.config/perch/spaces.conf, INCLUDING unregistered "stray" terminals (categorized
+# by their marker pattern, the same way perch's categorize() does). Each target
+# desktop is tiled full-width, equal-height, stacked. The working desktop (portrait
+# desktop 1) and non-server terminals (plain shells) are left alone.
+#   perch-place-category            move + tile
+#   perch-place-category dry        print the grouping, move nothing
+#   perch-place-category notile     move only, don't retile
+import subprocess, json, os, re, collections, sys, time
+
+HOME = os.path.expanduser("~")
+SPACES = os.environ.get("PERCH_SPACES", HOME + "/.config/perch/spaces.conf")
+PROJECTS = os.environ.get("PERCH_PROJECTS", HOME + "/.config/perch/projects.conf")
+DRY = "dry" in sys.argv or "--dry" in sys.argv
+NOTILE = "notile" in sys.argv or "--no-tile" in sys.argv
+
+def y(*a): subprocess.run(["yabai", "-m", *a], capture_output=True)
+def q(*a): return json.loads(subprocess.check_output(["yabai", "-m", "query", *a]))
+
+def terminal_titles():
+    # yabai often reports Terminal AXTitle as "" — read the authoritative custom
+    # titles straight from Terminal, keyed by window id (== yabai window id).
+    scr = ('tell application "Terminal"\n'
+           'set out to ""\n'
+           'repeat with w in windows\n'
+           'set t to ""\n'
+           'try\n set t to custom title of w\n end try\n'
+           'if t is "" then\n try\n set t to name of w\n end try\n end if\n'
+           'set out to out & (id of w as string) & ":::" & t & linefeed\n'
+           'end repeat\n'
+           'return out\n'
+           'end tell')
+    try:
+        raw = subprocess.check_output(["osascript", "-e", scr], text=True)
+    except Exception:
+        return {}
+    out = {}
+    for line in raw.splitlines():
+        if ":::" not in line:
+            continue
+        wid, title = line.split(":::", 1)
+        try:
+            out[int(wid)] = title.strip()
+        except ValueError:
+            pass
+    return out
+
+# ---- config: category defaults + per-marker overrides ----
+overrides, defaults = {}, {}
+CATS = ("metro", "landing", "web", "admin", "backend", "other")
+try:
+    for line in open(SPACES):
+        line = line.strip()
+        if not line or line.startswith("#") or "|" not in line:
+            continue
+        name, spec = line.split("|", 1)
+        name, spec = name.strip(), spec.strip().replace(" ", "")
+        (defaults if name in CATS else overrides)[name] = spec
+except FileNotFoundError:
+    pass
+
+ports = {}
+try:
+    for line in open(PROJECTS):
+        line = line.strip()
+        if not line or line.startswith("#") or "|" not in line:
+            continue
+        p = line.split("|")
+        ports[p[0].strip()] = (p[1].strip() if len(p) > 1 else "-")
+except FileNotFoundError:
+    pass
+
+STRONG = re.compile(r"metro|admin|backend|landing|portfolio|website|dashboard|web|-api$")
+
+def categorize(marker):
+    lc = marker.lower()
+    if "metro" in lc: return "metro"
+    if "admin" in lc: return "admin"
+    if "backend" in lc or lc.endswith("-api"): return "backend"
+    p = ports.get(marker, "")
+    if p in ("8000", "8001", "8080"): return "backend"
+    if p in ("8082", "8083", "8084", "8085", "8086", "8087", "8088", "8089", "8090", "8091"): return "metro"
+    if "landing" in lc or "portfolio" in lc or "website" in lc: return "landing"
+    if p == "-": return "other"
+    return "web"
+
+def is_server(marker):
+    return marker in ports or bool(STRONG.search(marker.lower()))
+
+def marker_of(title):
+    parts = [re.sub(r"\s*-\s*port:\d+\s*$", "", s.strip()) for s in title.split(" — ")]
+    for p in parts:                                   # 1. a segment that is a registered marker
+        if p in ports:
+            return p
+    for p in parts:                                   # 2. a segment that looks like a server marker
+        if " " not in p and len(p) <= 40 and STRONG.search(p.lower()):
+            return p
+    return parts[1] if len(parts) >= 2 else (parts[0] if parts else "")
+
+disps = q("--displays"); spaces = q("--spaces"); wins = q("--windows")
+portrait = [d for d in disps if d["frame"]["h"] > d["frame"]["w"]]
+if not portrait:
+    print("perch place category: no portrait display found"); raise SystemExit(0)
+pdisp = portrait[0]["index"]
+
+def desks(display):
+    return sorted([s for s in spaces if s["display"] == display and not s.get("is-native-fullscreen")],
+                  key=lambda s: s["index"])
+
+def resolve(spec):
+    if ":" in spec:
+        d, ordn = spec.split(":"); ordn = int(ordn); od = desks(int(d))
+        return od[ordn - 1]["index"] if 1 <= ordn <= len(od) else None
+    try:
+        return int(spec)
+    except ValueError:
+        return None
+
+disp_by_space = {s["index"]: s["display"] for s in spaces}
+frame_by_disp = {d["index"]: d["frame"] for d in disps}
+# desktop -> its intended category (from the category defaults, for labelling)
+label_of_sp = {}
+for cat, spec in defaults.items():
+    sp = resolve(spec)
+    if sp:
+        label_of_sp[sp] = cat
+
+titles = terminal_titles()
+assign = collections.defaultdict(list)
+for w in wins:
+    if w.get("app") != "Terminal":
+        continue
+    title = titles.get(w["id"]) or (w.get("title") or "").strip()
+    if not title:
+        continue
+    marker = marker_of(title)
+    if not is_server(marker) and " - port:" not in title:
+        continue
+    cat = categorize(marker)
+    spec = overrides.get(marker) or defaults.get(cat)
+    if not spec:
+        continue
+    sp = resolve(spec)
+    if not sp:
+        continue
+    assign[sp].append((w, marker, cat))
+
+if not assign:
+    print("perch place category: no server terminals to place"); raise SystemExit(0)
+
+for sp in sorted(assign):
+    items = assign[sp]
+    print(f"  desktop space {sp} [{label_of_sp.get(sp, '?')}]: " + ", ".join(m for _, m, _ in items))
+
+if DRY:
+    print("perch place category: DRY RUN — nothing moved")
+    raise SystemExit(0)
+
+# move — count failures; yabai "could not locate the window" == stale window tracking
+fails = 0
+for sp, items in assign.items():
+    for w, _, _ in items:
+        if w["space"] != sp:
+            r = subprocess.run(["yabai", "-m", "window", str(w["id"]), "--space", str(sp)],
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                fails += 1
+
+# self-heal: stale yabai tracking silently drops moves. Restart yabai once and re-exec
+# a fresh pass. Guards: PERCH_PLACE_HEALED (no 2nd heal in the retried run) + a 90s lock
+# (a yabai restart itself fires display_changed → autoplace, so bound the restart rate).
+HEAL_LOCK = "/tmp/perch-place-heal.lock"
+recent = os.path.exists(HEAL_LOCK) and (time.time() - os.path.getmtime(HEAL_LOCK) < 90)
+if fails and "PERCH_PLACE_HEALED" not in os.environ and not recent:
+    print(f"perch place category: {fails} move(s) failed (stale yabai tracking) — restarting yabai + retrying")
+    open(HEAL_LOCK, "w").close()
+    subprocess.run(["yabai", "--restart-service"], capture_output=True)
+    for _ in range(6):
+        time.sleep(2)
+        if subprocess.run(["yabai", "-m", "query", "--displays"], capture_output=True).returncode == 0:
+            break
+    os.execve(sys.executable, [sys.executable] + sys.argv, dict(os.environ, PERCH_PLACE_HEALED="1"))
+
+# tile each desktop full-width, stacked. Re-query the ACTUAL windows now on each target
+# space — tiling the pre-move `assign` (a window that failed to move, or a stale count)
+# is what left gaps/overlaps = "not filling". Sizing from reality fills the desktop.
+if not NOTILE:
+    TOP, GAP = 32, 8
+    fresh = q("--windows")
+    targets = set(assign)
+    persp = collections.defaultdict(list)
+    for w in fresh:
+        if w.get("app") == "Terminal" and w.get("space") in targets:
+            persp[w["space"]].append(w)
+    for sp, items in sorted(persp.items()):
+        f = frame_by_disp[disp_by_space[sp]]
+        FX, FY, FW, FH = f["x"], f["y"], f["w"], f["h"]
+        n = len(items); ah = (FH - TOP - GAP) / n
+        for i, w in enumerate(sorted(items, key=lambda x: x["id"])):
+            y("window", str(w["id"]), "--move", f"abs:{int(FX+GAP)}:{int(FY+TOP+i*ah)}")
+            y("window", str(w["id"]), "--resize", f"abs:{int(FW-2*GAP)}:{int(ah-GAP)}")
+
+total = sum(len(v) for v in assign.values())
+print(f"perch place category: grouped {total} terminals by type across {len(assign)} desktop(s)")

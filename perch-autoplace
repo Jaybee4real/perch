@@ -1,0 +1,12 @@
+#!/bin/sh
+# Debounced auto-arrange, fired by yabai window/display signals. Runs `perch place`
+# (category grouping): every tab titled "<marker> - port:N" goes to its category's
+# desktop from spaces.conf, registered or not.
+# An atomic mkdir lock coalesces bursts (opening several tabs) into a single pass.
+LOCK=/tmp/perch-autoplace.lock
+[ -d "$LOCK" ] && [ -z "$(find "$LOCK" -mmin -0.5 2>/dev/null)" ] && rmdir "$LOCK" 2>/dev/null
+mkdir "$LOCK" 2>/dev/null || exit 0
+trap 'rmdir "$LOCK" 2>/dev/null' EXIT INT TERM
+sleep 1.2
+/usr/bin/python3 /Users/jaybee4real/.local/bin/perch-place-category >/dev/null 2>&1
+/usr/bin/python3 /Users/jaybee4real/.local/bin/perch-cd-idle >/dev/null 2>&1

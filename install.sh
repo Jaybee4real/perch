@@ -14,6 +14,13 @@ ln -sf "$repo_dir/perch" "$bin_dir/perch"
 # pz-dev was perch's old name; keep it working for old muscle memory and scripts.
 ln -sfn perch "$bin_dir/pz-dev"
 
+# perch shells out to these for placement and the idle-tab cd; they must sit
+# beside it on PATH or `perch place` silently degrades to a no-op.
+for helper in perch-place-category perch-place-empty perch-autoplace perch-cd-idle; do
+  chmod +x "$repo_dir/$helper"
+  ln -sf "$repo_dir/$helper" "$bin_dir/$helper"
+done
+
 # Your registry is private and lives only here, never in the repo.
 if [ ! -f "$config_dir/projects.conf" ]; then
   cp "$repo_dir/projects.conf.example" "$config_dir/projects.conf"
