@@ -7,7 +7,7 @@
 # Run `perch help` for usage.
 set -euo pipefail
 
-PERCH_VERSION="2.9.0"
+PERCH_VERSION="2.10.0"
 CONFIG="${PERCH_CONFIG:-$HOME/.config/perch/projects.conf}"
 FAVORITES="${PERCH_FAVORITES:-$HOME/.config/perch/favorites}"
 CATEGORIES="${PERCH_CATEGORIES:-$HOME/.config/perch/categories.conf}"
@@ -84,6 +84,7 @@ USAGE
   perch groups                           list projects grouped by product cluster, with ports + status
   perch stop <project|port>              kill whatever holds that project's port
   perch clear                            clear text + scrollback of ALL Terminal tabs (Cmd+K, keeps servers running)
+  perch tidy [--dry]                     close every Terminal tab sitting idle; keeps anything still running
   perch killall                          stop every running registered server (by port)
   perch killall --close                  ...and close their Terminal tabs too
   perch killall fav                      stop only the servers in your favorites
@@ -154,7 +155,7 @@ resolve_project() {
   resolve_by_dirbase "$wanted"
 }
 
-COMMANDS="fav pick place set gui setup doctor list groups autoplace stop killall add remove config port bounds start restart help"
+COMMANDS="fav pick place set gui setup doctor list groups autoplace stop killall tidy add remove config port bounds start restart help"
 
 # Read candidate strings on stdin; print up to 3 closest to $1 by edit distance
 # (deduped, nearest first), keeping only ones within a sane threshold.
@@ -1043,6 +1044,93 @@ OSA
   fi
 }
 
+# Close every Terminal tab sitting at an idle prompt, keeping any tab that still has a
+# process running. Two passes on purpose: Terminal silently REFUSES to close a tab whose
+# shell is alive (it reports success and closes nothing), so pass 1 exits those shells
+# and pass 2 closes the windows left with nothing running.
+cmd_tidy() {
+  local dry=0 arg
+  for arg in "$@"; do
+    case "$arg" in --dry|dry|-n|--dry-run) dry=1 ;; esac
+  done
+
+  local listing; listing="$(/usr/bin/osascript 2>/dev/null <<'OSA'
+set out to ""
+tell application "Terminal"
+  repeat with w in windows
+    try
+      repeat with t in tabs of w
+        set ttl to ""
+        try
+          set ttl to custom title of t
+        end try
+        if ttl is "" then set ttl to "(untitled)"
+        if busy of t then
+          set out to out & "BUSY\t" & ttl & linefeed
+        else
+          set out to out & "IDLE\t" & ttl & linefeed
+        end if
+      end repeat
+    end try
+  end repeat
+end tell
+return out
+OSA
+)"
+  [ -n "$listing" ] || { echo "[perch] no Terminal tabs open"; return 0; }
+
+  local idle busy
+  idle="$(printf '%s\n' "$listing" | grep -c '^IDLE' || true)"
+  busy="$(printf '%s\n' "$listing" | grep -c '^BUSY' || true)"
+  printf '%s\n' "$listing" | awk -F'\t' '$1=="IDLE"{print "  close  " $2}'
+  printf '%s\n' "$listing" | awk -F'\t' '$1=="BUSY"{print "  keep   " $2 "  (running)"}'
+
+  if [ "$idle" = "0" ]; then
+    echo "[perch] nothing idle — $busy tab(s) still running"
+    return 0
+  fi
+  if [ "$dry" = "1" ]; then
+    echo "[perch] tidy --dry: would close $idle idle tab(s), keep $busy running"
+    return 0
+  fi
+
+  /usr/bin/osascript >/dev/null 2>&1 <<'OSA'
+tell application "Terminal"
+  repeat with i from (count of windows) to 1 by -1
+    try
+      repeat with j from (count of tabs of window i) to 1 by -1
+        set t to tab j of window i
+        if not (busy of t) then do script "exit" in t
+      end repeat
+    end try
+  end repeat
+end tell
+OSA
+
+  sleep 3
+
+  local closed; closed="$(/usr/bin/osascript 2>/dev/null <<'OSA'
+set n to 0
+tell application "Terminal"
+  repeat with i from (count of windows) to 1 by -1
+    try
+      set b to 0
+      repeat with t in tabs of window i
+        if busy of t then set b to b + 1
+      end repeat
+      if b is 0 then
+        set n to n + (count of tabs of window i)
+        close window i saving no
+      end if
+    end try
+  end repeat
+end tell
+return n as string
+OSA
+)"
+  echo "[perch] tidy: closed ${closed:-0} idle tab(s), kept $busy running"
+}
+
 # Clear the visible text + scrollback of every Terminal tab (like Cmd+K), without
 # stopping anything. Writes the clear escape straight to each tab's tty, so it works
 # even in tabs running a live server (a plain `clear` can't — the shell isn't reading).
@@ -1483,7 +1571,7 @@ cmd_completion() {
     zsh) cat <<'ZSH'
 _perch() {
   local -a _c _p
-  _c=(start restart run stop clear cls open url list groups fav pick place autoplace set gui setup doctor completion port bounds add remove config killall help)
+  _c=(start restart run stop clear cls open url list groups fav pick place autoplace set gui setup doctor completion port bounds add remove config killall tidy help)
   _p=(${(f)"$(command perch _names 2>/dev/null)"})
   compadd -a _c; compadd -a _p
 }
@@ -1493,7 +1581,7 @@ ZSH
     bash) cat <<'BASH'
 _perch() {
   local cur="${COMP_WORDS[COMP_CWORD]}"
-  local words="start restart run stop clear cls open url list groups fav pick place autoplace set gui setup doctor completion port bounds add remove config killall help $(command perch _names 2>/dev/null)"
+  local words="start restart run stop clear cls open url list groups fav pick place autoplace set gui setup doctor completion port bounds add remove config killall tidy help $(command perch _names 2>/dev/null)"
   COMPREPLY=( $(compgen -W "$words" -- "$cur") )
 }
 complete -F _perch perch pz-dev
@@ -2395,6 +2483,22 @@ even in tabs running a live process (writes the clear escape straight to the tty
 which a plain `clear` can't do while a server holds the shell).
 EOF
     ;;
+    tidy|tidyup|closeidle) cat <<'EOF'
+perch tidy — close every Terminal tab that is sitting at an idle prompt.
+
+USAGE
+  perch tidy                list what would go, then close the idle tabs
+  perch tidy --dry          list only, close nothing
+
+A tab counts as idle when Terminal reports no process running in it, so a server
+still serving is never touched. Dead perch tabs (the server exited, the shell came
+back to a prompt) ARE closed — relaunch the project and perch makes the tab again.
+
+Two passes, because Terminal refuses to close a tab whose shell is alive and reports
+success while closing nothing: pass 1 exits the idle shells, pass 2 closes the windows
+left with nothing running.
+EOF
+    ;;
     killall|kill-all|stopall) cat <<'EOF'
 perch killall — stop running registered servers by freeing their ports.
 
@@ -2496,6 +2600,7 @@ main() {
     pick|choose) cmd_pick ;;
     bounds|pos|position) shift; cmd_bounds "$@" ;;
     killall|kill-all|stopall) shift; cmd_killall "$@" ;;
+    tidy|tidyup|closeidle) shift; cmd_tidy "$@" ;;
     clear|cls) cmd_clear ;;
     open) shift; cmd_open "${1:-}" ;;
     url|urls) shift; cmd_url "${1:-}" ;;

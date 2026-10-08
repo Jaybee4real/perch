@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.10.0
+
+### Added — `perch tidy`
+- **`perch tidy`** closes every Terminal tab sitting at an idle prompt and keeps anything still running. `perch tidy --dry` lists without closing. A tab counts as idle when Terminal reports no process in it, so a live server is never touched; a dead perch tab (server exited, shell back at a prompt) is closed and perch recreates it on next launch.
+- Two passes on purpose: **Terminal silently refuses to close a tab whose shell is alive** — it reports success and closes nothing. Pass 1 exits the idle shells, pass 2 closes the windows left with nothing running.
+
 ## 2.9.0
 
 ### Fixed — autoplace ignored titles, and `*-api` servers were never placed
